@@ -39,7 +39,6 @@ extern crate alloc;
 
 use alloc::{vec, vec::Vec};
 use bitflags::bitflags;
-use glam::{Vec2, Vec3};
 
 mod geometry;
 
@@ -52,10 +51,10 @@ pub use geometry::Geometry;
 /// Returns `false` if the geometry is unsuitable for tangent generation including,
 /// but not limited to, lack of vertices.
 pub fn generate_tangents<G: Geometry>(geometry: &mut G) -> bool {
-    generate_tangents_with(geometry, 180.0)
+    generate_tangents_with(geometry, -1.0)
 }
 
-fn generate_tangents_with<G: Geometry>(geometry: &mut G, angular_threshold: f32) -> bool {
+fn generate_tangents_with<G: Geometry>(geometry: &mut G, thres_cos: f32) -> bool {
     // count triangles on supported faces
     let mut triangles_count = 0;
     for face in 0..geometry.num_faces() {
@@ -129,9 +128,9 @@ fn generate_tangents_with<G: Geometry>(geometry: &mut G, angular_threshold: f32)
 
     let mut tspaces = vec![
         TSpace {
-            os: Vec3::new(1.0, 0.0, 0.0),
+            os: [1.0, 0.0, 0.0],
             mag_s: 1.0,
-            ot: Vec3::new(0.0, 1.0, 0.0),
+            ot: [0.0, 1.0, 0.0],
             mag_t: 1.0,
             ..TSpace::zero()
         };
@@ -141,7 +140,6 @@ fn generate_tangents_with<G: Geometry>(geometry: &mut G, angular_threshold: f32)
     // make tspaces, each group is split up into subgroups if necessary
     // based on fAngularThreshold. Finally a tangent space is made for
     // every resulting subgroup
-    let thres_cos = cos(angular_threshold * core::f32::consts::PI / 180.0);
     generate_tspaces(
         geometry,
         &mut tspaces,
@@ -177,11 +175,9 @@ fn generate_tangents_with<G: Geometry>(geometry: &mut G, angular_threshold: f32)
             // set data
             for i in 0..verts_0 {
                 let tspace = &tspaces[index];
-                let tang = Vec3::new(tspace.os.x, tspace.os.y, tspace.os.z);
-                let bitang = Vec3::new(tspace.ot.x, tspace.ot.y, tspace.ot.z);
                 geometry.set_tangent(
-                    tang.into(),
-                    bitang.into(),
+                    tspace.os,
+                    tspace.ot,
                     tspace.mag_s,
                     tspace.mag_t,
                     tspace.orient,
@@ -200,8 +196,8 @@ fn generate_tangents_with<G: Geometry>(geometry: &mut G, angular_threshold: f32)
 struct TriangleInfo {
     face_neighbors: [i32; 3],
     assigned_group: [usize; 3],
-    os: Vec3,
-    ot: Vec3,
+    os: [f32; 3],
+    ot: [f32; 3],
     mag_s: f32,
     mag_t: f32,
     /// Index of the face this triangle maps to, in the original faces.
@@ -287,8 +283,8 @@ fn generate_initial_vertex_indices<G: Geometry>(
             let t1 = get_tex_coord(geometry, i1);
             let t2 = get_tex_coord(geometry, i2);
             let t3 = get_tex_coord(geometry, i3);
-            let length_squared_02: f32 = (t2 - t0).length_squared();
-            let length_squared_13: f32 = (t3 - t1).length_squared();
+            let length_squared_02: f32 = distance_squared(t2, t0);
+            let length_squared_13: f32 = distance_squared(t3, t1);
             let quad_diagonal_is_02;
 
             if length_squared_02 < length_squared_13 {
@@ -300,8 +296,8 @@ fn generate_initial_vertex_indices<G: Geometry>(
                 let p1 = get_position(geometry, i1);
                 let p2 = get_position(geometry, i2);
                 let p3 = get_position(geometry, i3);
-                let length_squared_02_0: f32 = (p2 - p0).length_squared();
-                let length_squared_13_0: f32 = (p3 - p1).length_squared();
+                let length_squared_02_0: f32 = distance_squared(p2, p0);
+                let length_squared_13_0: f32 = distance_squared(p3, p1);
                 quad_diagonal_is_02 = length_squared_13_0 >= length_squared_02_0;
             }
 
@@ -356,27 +352,27 @@ fn index_to_face_vertex(index: usize) -> (usize, usize) {
     (index >> 2, index & 0x3)
 }
 
-fn get_position<G: Geometry>(geometry: &mut G, index: usize) -> Vec3 {
+fn get_position<G: Geometry>(geometry: &mut G, index: usize) -> [f32; 3] {
     let (face, vert) = index_to_face_vertex(index);
-    geometry.position(face, vert).into()
+    geometry.position(face, vert)
 }
 
-fn get_tex_coord<G: Geometry>(geometry: &mut G, index: usize) -> Vec3 {
+fn get_tex_coord<G: Geometry>(geometry: &mut G, index: usize) -> [f32; 3] {
     let (face, vert) = index_to_face_vertex(index);
-    let tex_coord: Vec2 = geometry.tex_coord(face, vert).into();
-    tex_coord.extend(1.0)
+    let tex_coord = geometry.tex_coord(face, vert);
+    [tex_coord[0], tex_coord[1], 1.0]
 }
 
-fn get_normal<G: Geometry>(geometry: &mut G, index: usize) -> Vec3 {
+fn get_normal<G: Geometry>(geometry: &mut G, index: usize) -> [f32; 3] {
     let (face, vert) = index_to_face_vertex(index);
-    geometry.normal(face, vert).into()
+    geometry.normal(face, vert)
 }
 
 #[derive(Copy, Clone)]
 struct TSpace {
-    os: Vec3,
+    os: [f32; 3],
     mag_s: f32,
-    ot: Vec3,
+    ot: [f32; 3],
     mag_t: f32,
     counter: i32,
     orient: bool,
@@ -629,10 +625,8 @@ fn generate_tspaces<G: Geometry>(
             }
             let vertex_index = vertex_indices[(f * 3 + index) as usize];
             let n = get_normal(geometry, vertex_index as usize);
-            let mut v_os =
-                triangles_info[f as usize].os - (n.dot(triangles_info[f as usize].os) * n);
-            let mut v_ot =
-                triangles_info[f as usize].ot - (n.dot(triangles_info[f as usize].ot) * n);
+            let mut v_os = project(triangles_info[f as usize].os, n);
+            let mut v_ot = project(triangles_info[f as usize].ot, n);
             if v_not_zero(v_os) {
                 v_os = normalize(v_os);
             }
@@ -646,10 +640,8 @@ fn generate_tspaces<G: Geometry>(
                 let t: i32 = face_indices_buffer[offset];
 
                 let of_2: i32 = triangles_info[t as usize].original_face_index;
-                let mut v_os2 =
-                    triangles_info[t as usize].os - (n.dot(triangles_info[t as usize].os) * n);
-                let mut v_ot2 =
-                    triangles_info[t as usize].ot - (n.dot(triangles_info[t as usize].ot) * n);
+                let mut v_os2 = project(triangles_info[t as usize].os, n);
+                let mut v_ot2 = project(triangles_info[t as usize].ot, n);
                 if v_not_zero(v_os2) {
                     v_os2 = normalize(v_os2);
                 }
@@ -661,8 +653,8 @@ fn generate_tspaces<G: Geometry>(
                 let any = flags.contains(TriangleFlags::GROUP_WITH_ANY);
                 // make sure triangles which belong to the same quad are joined.
                 let same_org_face: bool = of_1 == of_2;
-                let cos_s: f32 = v_os.dot(v_os2);
-                let cos_t: f32 = v_ot.dot(v_ot2);
+                let cos_s: f32 = dot(v_os, v_os2);
+                let cos_t: f32 = dot(v_ot, v_ot2);
                 if any || same_org_face || cos_s > thres_cos && cos_t > thres_cos {
                     let fresh0 = members;
                     members += 1;
@@ -716,9 +708,9 @@ fn generate_tspaces<G: Geometry>(
 
 fn avg_tspace(tspace0: &TSpace, tspace1: &TSpace) -> TSpace {
     let mut ts_res: TSpace = TSpace {
-        os: Vec3::new(0.0, 0.0, 0.0),
+        os: [0.0, 0.0, 0.0],
         mag_s: 0.,
-        ot: Vec3::new(0.0, 0.0, 0.0),
+        ot: [0.0, 0.0, 0.0],
         mag_t: 0.,
         counter: 0,
         orient: false,
@@ -735,8 +727,8 @@ fn avg_tspace(tspace0: &TSpace, tspace1: &TSpace) -> TSpace {
     } else {
         ts_res.mag_s = 0.5f32 * (tspace0.mag_s + tspace1.mag_s);
         ts_res.mag_t = 0.5f32 * (tspace0.mag_t + tspace1.mag_t);
-        ts_res.os = tspace0.os + tspace1.os;
-        ts_res.ot = tspace0.ot + tspace1.ot;
+        ts_res.os = add(tspace0.os, tspace1.os);
+        ts_res.ot = add(tspace0.ot, tspace1.ot);
         if v_not_zero(ts_res.os) {
             ts_res.os = normalize(ts_res.os);
         }
@@ -745,18 +737,6 @@ fn avg_tspace(tspace0: &TSpace, tspace1: &TSpace) -> TSpace {
         }
     }
     ts_res
-}
-
-fn normalize(v: Vec3) -> Vec3 {
-    (1.0 / v.length()) * v
-}
-
-fn v_not_zero(v: Vec3) -> bool {
-    not_zero(v.x) || not_zero(v.y) || not_zero(v.z)
-}
-
-fn not_zero(fx: f32) -> bool {
-    abs(fx) > 1.1754944e-38f32
 }
 
 fn eval_tspace<G: Geometry>(
@@ -768,22 +748,14 @@ fn eval_tspace<G: Geometry>(
     vertex_representative: i32,
 ) -> TSpace {
     let mut res: TSpace = TSpace {
-        os: Vec3::new(0.0, 0.0, 0.0),
+        os: [0.0, 0.0, 0.0],
         mag_s: 0.,
-        ot: Vec3::new(0.0, 0.0, 0.0),
+        ot: [0.0, 0.0, 0.0],
         mag_t: 0.,
         counter: 0,
         orient: false,
     };
     let mut angle_sum: f32 = 0i32 as f32;
-    res.os.x = 0.0f32;
-    res.os.y = 0.0f32;
-    res.os.z = 0.0f32;
-    res.ot.x = 0.0f32;
-    res.ot.y = 0.0f32;
-    res.ot.z = 0.0f32;
-    res.mag_s = 0i32 as f32;
-    res.mag_t = 0i32 as f32;
     for face in 0..faces_count {
         let f: i32 = face_indices_buffer[face as usize];
 
@@ -802,10 +774,8 @@ fn eval_tspace<G: Geometry>(
             }
             let index = vertex_indices[(3i32 * f + i) as usize];
             let n = get_normal(geometry, index as usize);
-            let mut v_os =
-                triangles_info[f as usize].os - (n.dot(triangles_info[f as usize].os) * n);
-            let mut v_ot =
-                triangles_info[f as usize].ot - (n.dot(triangles_info[f as usize].ot) * n);
+            let mut v_os = project(triangles_info[f as usize].os, n);
+            let mut v_ot = project(triangles_info[f as usize].ot, n);
             if v_not_zero(v_os) {
                 v_os = normalize(v_os);
             }
@@ -818,22 +788,22 @@ fn eval_tspace<G: Geometry>(
             let p0 = get_position(geometry, i0 as usize);
             let p1 = get_position(geometry, i1 as usize);
             let p2 = get_position(geometry, i2 as usize);
-            let v1 = p0 - p1;
-            let v2 = p2 - p1;
-            let mut v1 = v1 - (n.dot(v1) * n);
+            let v1 = subtract(p0, p1);
+            let v2 = subtract(p2, p1);
+            let mut v1 = project(v1, n);
             if v_not_zero(v1) {
                 v1 = normalize(v1);
             }
-            let mut v2 = v2 - (n.dot(v2) * n);
+            let mut v2 = project(v2, n);
             if v_not_zero(v2) {
                 v2 = normalize(v2);
             }
-            let cos = v1.dot(v2).clamp(-1.0, 1.0);
-            let angle = acosf64(cos as f64) as f32;
+            let cos = dot(v1, v2).clamp(-1.0, 1.0);
+            let angle = acos(cos as f64) as f32;
             let mag_s = triangles_info[f as usize].mag_s;
             let mag_t = triangles_info[f as usize].mag_t;
-            res.os += angle * v_os;
-            res.ot += angle * v_ot;
+            res.os = add(res.os, multiply(v_os, angle));
+            res.ot = add(res.ot, multiply(v_ot, angle));
             res.mag_s += angle * mag_s;
             res.mag_t += angle * mag_t;
             angle_sum += angle;
@@ -1089,12 +1059,8 @@ fn init_tri_info<G: Geometry>(
         for i in 0..3 {
             triangles_info[f].face_neighbors[i as usize] = -1i32;
             triangles_info[f].assigned_group[i as usize] = usize::MAX;
-            triangles_info[f].os.x = 0.0f32;
-            triangles_info[f].os.y = 0.0f32;
-            triangles_info[f].os.z = 0.0f32;
-            triangles_info[f].ot.x = 0.0f32;
-            triangles_info[f].ot.y = 0.0f32;
-            triangles_info[f].ot.z = 0.0f32;
+            triangles_info[f].os = [0.0f32; 3];
+            triangles_info[f].ot = [0.0f32; 3];
             triangles_info[f].mag_s = 0i32 as f32;
             triangles_info[f].mag_t = 0i32 as f32;
 
@@ -1111,15 +1077,15 @@ fn init_tri_info<G: Geometry>(
         let t1 = get_tex_coord(geometry, vertex_indices[f * 3] as usize);
         let t2 = get_tex_coord(geometry, vertex_indices[f * 3 + 1] as usize);
         let t3 = get_tex_coord(geometry, vertex_indices[f * 3 + 2] as usize);
-        let t21x: f32 = t2.x - t1.x;
-        let t21y: f32 = t2.y - t1.y;
-        let t31x: f32 = t3.x - t1.x;
-        let t31y: f32 = t3.y - t1.y;
-        let d1 = v2 - v1;
-        let d2 = v3 - v1;
+        let t21x: f32 = t2[0] - t1[0];
+        let t21y: f32 = t2[1] - t1[1];
+        let t31x: f32 = t3[0] - t1[0];
+        let t31y: f32 = t3[1] - t1[1];
+        let d1 = subtract(v2, v1);
+        let d2 = subtract(v3, v1);
         let signed_arena_stx2: f32 = t21x * t31y - t21y * t31x;
-        let os = (t31y * d1) - (t21y * d2);
-        let ot = (-t31x * d1) + (t21x * d2);
+        let os = subtract(multiply(d1, t31y), multiply(d2, t21y));
+        let ot = add(multiply(d1, -t31x), multiply(d2, t21x));
 
         triangles_info[f]
             .flags
@@ -1127,8 +1093,8 @@ fn init_tri_info<G: Geometry>(
 
         if not_zero(signed_arena_stx2) {
             let abs_arena: f32 = abs(signed_arena_stx2);
-            let len_os: f32 = os.length();
-            let len_ot: f32 = ot.length();
+            let len_os: f32 = length(os);
+            let len_ot: f32 = length(ot);
             let s: f32 = if !triangles_info[f]
                 .flags
                 .contains(TriangleFlags::ORIENT_PRESERVING)
@@ -1138,10 +1104,10 @@ fn init_tri_info<G: Geometry>(
                 1.0f32
             };
             if not_zero(len_os) {
-                triangles_info[f].os = (s / len_os) * os;
+                triangles_info[f].os = multiply(os, s / len_os);
             }
             if not_zero(len_ot) {
-                triangles_info[f].ot = (s / len_ot) * ot;
+                triangles_info[f].ot = multiply(ot, s / len_ot);
             }
 
             // evaluate magnitudes prior to normalization of vOs and vOt
@@ -1411,10 +1377,10 @@ fn calc_tex_area<G: Geometry>(geometry: &mut G, indices: &[i32], start: usize) -
     let t1 = get_tex_coord(geometry, indices[start] as usize);
     let t2 = get_tex_coord(geometry, indices[start + 1] as usize);
     let t3 = get_tex_coord(geometry, indices[start + 2] as usize);
-    let t21x: f32 = t2.x - t1.x;
-    let t21y: f32 = t2.y - t1.y;
-    let t31x: f32 = t3.x - t1.x;
-    let t31y: f32 = t3.y - t1.y;
+    let t21x: f32 = t2[0] - t1[0];
+    let t21y: f32 = t2[1] - t1[1];
+    let t31x: f32 = t3[0] - t1[0];
+    let t31y: f32 = t3[1] - t1[1];
     let signed_area_stx2: f32 = t21x * t31y - t21y * t31x;
     if signed_area_stx2 < 0i32 as f32 {
         -signed_area_stx2
@@ -1513,34 +1479,34 @@ fn generate_shared_vertices_index_list<G: Geometry>(
     for i in 1..triangles_count * 3 {
         let index: i32 = vertex_indices[i];
         let p = get_position(geometry, index as usize);
-        if min.x > p.x {
-            min.x = p.x;
-        } else if max.x < p.x {
-            max.x = p.x;
+        if min[0] > p[0] {
+            min[0] = p[0];
+        } else if max[0] < p[0] {
+            max[0] = p[0];
         }
-        if min.y > p.y {
-            min.y = p.y;
-        } else if max.y < p.y {
-            max.y = p.y;
+        if min[1] > p[1] {
+            min[1] = p[1];
+        } else if max[1] < p[1] {
+            max[1] = p[1];
         }
-        if min.z > p.z {
-            min.z = p.z;
-        } else if max.z < p.z {
-            max.z = p.z;
+        if min[2] > p[2] {
+            min[2] = p[2];
+        } else if max[2] < p[2] {
+            max[2] = p[2];
         }
     }
-    let dim = max - min;
+    let dim = subtract(max, min);
     let mut channel = 0i32;
-    let mut f_min = min.x;
-    let mut f_max = max.x;
-    if dim.y > dim.x && dim.y > dim.z {
+    let mut f_min = min[0];
+    let mut f_max = max[0];
+    if dim[1] > dim[0] && dim[1] > dim[2] {
         channel = 1i32;
-        f_min = min.y;
-        f_max = max.y;
-    } else if dim.z > dim.x {
+        f_min = min[1];
+        f_max = max[1];
+    } else if dim[2] > dim[0] {
         channel = 2i32;
-        f_min = min.z;
-        f_max = max.z;
+        f_min = min[2];
+        f_max = max[2];
     }
 
     let mut hash_table = vec![0i32; triangles_count * 3];
@@ -1555,13 +1521,7 @@ fn generate_shared_vertices_index_list<G: Geometry>(
     for i in 0..triangles_count * 3 {
         let index_0: i32 = vertex_indices[i];
         let p_0 = get_position(geometry, index_0 as usize);
-        let val: f32 = if channel == 0i32 {
-            p_0.x
-        } else if channel == 1i32 {
-            p_0.y
-        } else {
-            p_0.z
-        };
+        let val = p_0[channel as usize];
         let cell = find_grid_cell(f_min, f_max, val);
         hash_count[cell] += 1;
     }
@@ -1578,13 +1538,7 @@ fn generate_shared_vertices_index_list<G: Geometry>(
     for i in 0..triangles_count * 3 {
         let index_1: i32 = vertex_indices[i];
         let p_1 = get_position(geometry, index_1 as usize);
-        let val_0: f32 = if channel == 0i32 {
-            p_1.x
-        } else if channel == 1i32 {
-            p_1.y
-        } else {
-            p_1.z
-        };
+        let val_0 = p_1[channel as usize];
         let cell_0 = find_grid_cell(f_min, f_max, val_0);
         hash_table[(hash_offsets[cell_0] + hash_count2[cell_0]) as usize] = i as i32;
         hash_count2[cell_0] += 1;
@@ -1612,9 +1566,7 @@ fn generate_shared_vertices_index_list<G: Geometry>(
             while e < entries {
                 let i_0: i32 = hash_table[table_0_offset + e];
                 let p_2 = get_position(geometry, vertex_indices[i_0 as usize] as usize);
-                tmp_vert[e].vert[0] = p_2.x;
-                tmp_vert[e].vert[1] = p_2.y;
-                tmp_vert[e].vert[2] = p_2.z;
+                tmp_vert[e].vert = p_2;
                 tmp_vert[e].index = i_0;
                 e += 1;
             }
@@ -1683,16 +1635,7 @@ fn merge_verts_fast<G: Geometry>(
                 let n2 = get_normal(geometry, index2 as usize);
                 let t2 = get_tex_coord(geometry, index2 as usize);
                 i2rec = i2;
-                if p.x == p2.x
-                    && p.y == p2.y
-                    && p.z == p2.z
-                    && n.x == n2.x
-                    && n.y == n2.y
-                    && n.z == n2.z
-                    && t.x == t2.x
-                    && t.y == t2.y
-                    && t.z == t2.z
-                {
+                if p == p2 && n == n2 && t == t2 {
                     not_found = false;
                 } else {
                     l2 += 1;
@@ -1760,37 +1703,70 @@ fn find_grid_cell(min: f32, max: f32, val: f32) -> usize {
     }
 }
 
-fn cos(value: f32) -> f32 {
-    #[cfg(feature = "std")]
-    {
-        value.cos()
-    }
-    #[cfg(all(not(feature = "std"), feature = "libm"))]
-    {
-        libm::cosf(value)
-    }
-    #[cfg(all(not(feature = "std"), not(feature = "libm")))]
-    {
-        compile_error!("Require either 'libm' or 'std' for `cos`")
-    }
+fn add([ax, ay, az]: [f32; 3], [bx, by, bz]: [f32; 3]) -> [f32; 3] {
+    [ax + bx, ay + by, az + bz]
+}
+
+fn subtract(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    add(a, b.map(|x| -x))
+}
+
+fn dot([ax, ay, az]: [f32; 3], [bx, by, bz]: [f32; 3]) -> f32 {
+    ax * bx + ay * by + az * bz
+}
+
+fn length_squared(a: [f32; 3]) -> f32 {
+    dot(a, a)
+}
+
+fn length(a: [f32; 3]) -> f32 {
+    sqrt(length_squared(a))
+}
+
+fn distance_squared(a: [f32; 3], b: [f32; 3]) -> f32 {
+    length_squared(subtract(a, b))
+}
+
+fn multiply(a: [f32; 3], b: f32) -> [f32; 3] {
+    a.map(|x| x * b)
+}
+
+fn project(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    subtract(a, multiply(b, dot(b, a)))
+}
+
+fn normalize(a: [f32; 3]) -> [f32; 3] {
+    multiply(a, 1.0 / length(a))
 }
 
 fn abs(value: f32) -> f32 {
+    if value < 0.0 { -value } else { value }
+}
+
+fn v_not_zero([ax, ay, az]: [f32; 3]) -> bool {
+    not_zero(ax) || not_zero(ay) || not_zero(az)
+}
+
+fn not_zero(fx: f32) -> bool {
+    abs(fx) > 1.1754944e-38f32
+}
+
+fn sqrt(value: f32) -> f32 {
     #[cfg(feature = "std")]
     {
-        value.abs()
+        value.sqrt()
     }
     #[cfg(all(not(feature = "std"), feature = "libm"))]
     {
-        libm::fabsf(value)
+        libm::sqrt(value)
     }
     #[cfg(all(not(feature = "std"), not(feature = "libm")))]
     {
-        compile_error!("Require either 'libm' or 'std' for `abs`")
+        compile_error!("Require either 'libm' or 'std' for `sqrt`")
     }
 }
 
-fn acosf64(value: f64) -> f64 {
+fn acos(value: f64) -> f64 {
     #[cfg(feature = "std")]
     {
         value.acos()

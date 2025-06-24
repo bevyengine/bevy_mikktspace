@@ -7,8 +7,8 @@
 )]
 use std::{fs::File, io::Read};
 
-use bevy_mikktspace::{generate_tangents, Geometry};
-use bytemuck::{bytes_of_mut, cast_slice_mut, Pod, Zeroable};
+use bevy_mikktspace::{Geometry, generate_tangents};
+use bytemuck::{Pod, Zeroable, bytes_of_mut, cast_slice_mut};
 
 struct Mesh {
     vertices: Vec<Vertex>,

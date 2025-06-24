@@ -7,15 +7,13 @@
 )]
 #![expect(clippy::print_stdout, reason = "Allowed in examples.")]
 
-use glam::{Vec2, Vec3};
-
 type Face = [u32; 3];
 
 #[derive(Debug)]
 struct Vertex {
-    position: Vec3,
-    normal: Vec3,
-    tex_coord: Vec2,
+    position: [f32; 3],
+    normal: [f32; 3],
+    tex_coord: [f32; 2],
 }
 
 struct Mesh {
@@ -246,13 +244,13 @@ fn make_cube() -> Mesh {
     }
 
     for pt in ctl_pts {
-        let p: Vec3 = pt.dir.into();
-        let n: Vec3 = p.normalize();
-        let t: Vec2 = pt.uv.into();
+        let p = pt.dir;
+        let n = normalize(p);
+        let t = pt.uv;
         vertices.push(Vertex {
-            position: (p / 2.0).into(),
-            normal: n.into(),
-            tex_coord: t.into(),
+            position: p.map(|x| x / 2.0),
+            normal: n,
+            tex_coord: t,
         });
     }
 
@@ -263,4 +261,9 @@ fn main() {
     let mut cube = make_cube();
     let ret = bevy_mikktspace::generate_tangents(&mut cube);
     assert_eq!(true, ret);
+}
+
+fn normalize([ax, ay, az]: [f32; 3]) -> [f32; 3] {
+    let f = 1.0 / (ax * ax + ay * ay + az * az).sqrt();
+    [ax, ay, az].map(|x| f * x)
 }
