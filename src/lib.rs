@@ -1124,7 +1124,7 @@ fn init_tri_info<G: Geometry>(
     }
 
     // force otherwise healthy quads to a fixed orientation
-    while t < triangles_count - 1 {
+    while t + 1 < triangles_count {
         let fo_a: i32 = triangles_info[t].original_face_index;
         let fo_b: i32 = triangles_info[t + 1].original_face_index;
         if fo_a == fo_b {
