@@ -9,6 +9,7 @@ use std::{fs::File, io::Read};
 
 use bevy_mikktspace::{Geometry, generate_tangents};
 use bytemuck::{Pod, Zeroable, bytes_of_mut, cast_slice_mut};
+use glam::Vec3;
 
 struct Mesh {
     vertices: Vec<Vertex>,
@@ -29,7 +30,30 @@ fn vertex(mesh: &Mesh, face: usize, vert: usize) -> &Vertex {
     &mesh.vertices[index as usize]
 }
 
+struct GlamSpace;
+
+impl bevy_mikktspace::VectorSpace for GlamSpace {
+    type Vec3 = Vec3;
+
+    fn length(a: Self::Vec3) -> f32 {
+        a.length()
+    }
+
+    fn angle_between(a: Self::Vec3, b: Self::Vec3) -> f32 {
+        let a = Self::normalize_or_zero(a);
+        let b = Self::normalize_or_zero(b);
+        let cos = a.dot(b).clamp(-1.0, 1.0);
+        (cos as f64).acos() as f32
+    }
+
+    fn dot(this: Self::Vec3, rhs: Self::Vec3) -> f32 {
+        this.dot(rhs)
+    }
+}
+
 impl Geometry for Mesh {
+    type Space = GlamSpace;
+
     fn num_faces(&self) -> usize {
         self.indices.len() / 3
     }
@@ -38,12 +62,12 @@ impl Geometry for Mesh {
         3
     }
 
-    fn position(&self, face: usize, vert: usize) -> [f32; 3] {
-        vertex(self, face, vert).position
+    fn position(&self, face: usize, vert: usize) -> Vec3 {
+        vertex(self, face, vert).position.into()
     }
 
-    fn normal(&self, face: usize, vert: usize) -> [f32; 3] {
-        vertex(self, face, vert).normal
+    fn normal(&self, face: usize, vert: usize) -> Vec3 {
+        vertex(self, face, vert).normal.into()
     }
 
     fn tex_coord(&self, face: usize, vert: usize) -> [f32; 2] {
@@ -52,8 +76,8 @@ impl Geometry for Mesh {
 
     fn set_tangent(
         &mut self,
-        tangent: [f32; 3],
-        _bi_tangent: [f32; 3],
+        tangent: Vec3,
+        _bi_tangent: Vec3,
         _mag_s: f32,
         _mag_t: f32,
         _bi_tangent_preserves_orientation: bool,
@@ -61,7 +85,7 @@ impl Geometry for Mesh {
         vert: usize,
     ) {
         let index = self.indices[(face * 3) + vert];
-        self.vertices[index as usize].tangent = tangent;
+        self.vertices[index as usize].tangent = tangent.into();
     }
 }
 
