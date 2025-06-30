@@ -42,6 +42,9 @@ use bitflags::bitflags;
 
 mod geometry;
 
+#[cfg(test)]
+mod tests;
+
 pub use geometry::Geometry;
 
 /// Generates tangents for the input geometry.
@@ -51,6 +54,11 @@ pub use geometry::Geometry;
 /// Returns `false` if the geometry is unsuitable for tangent generation including,
 /// but not limited to, lack of vertices.
 pub fn generate_tangents<G: Geometry>(geometry: &mut G) -> bool {
+    // This allows any invocation of `generate_tangents` to be compared against
+    // the reference C implementation without any additional tooling.
+    #[cfg(test)]
+    let geometry = &mut tests::shadow::Shadow::new(geometry);
+
     generate_tangents_with(geometry, -1.0)
 }
 

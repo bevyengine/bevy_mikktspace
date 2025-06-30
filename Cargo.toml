@@ -28,7 +28,8 @@ libm = { version = "0.2", default-features = false, optional = true }
 bitflags = "2.3"
 
 [dev-dependencies]
-bytemuck = { version = "1.13", features = ["derive"] }
+mikktspace-sys = "0.1.1"
+wavefront_obj = "11.0.0"
 
 [[example]]
 name = "cube_tangents"
