@@ -32,28 +32,26 @@
 //! >
 //! > 3. This notice may not be removed or altered from any source distribution.
 
-#[cfg(feature = "std")]
-extern crate std;
-
 extern crate alloc;
 
 use alloc::{vec, vec::Vec};
 use bitflags::bitflags;
 
 mod geometry;
+mod math;
 
 #[cfg(test)]
 mod tests;
 
+use geometry::GeometryExt;
+
 pub use geometry::Geometry;
+pub use math::VectorSpace;
+
+use crate::math::{abs, not_zero};
 
 /// Generates tangents for the input geometry.
-///
-/// # Errors
-///
-/// Returns `false` if the geometry is unsuitable for tangent generation including,
-/// but not limited to, lack of vertices.
-pub fn generate_tangents<G: Geometry>(geometry: &mut G) -> bool {
+pub fn generate_tangents<G: Geometry>(geometry: &mut G) {
     // This allows any invocation of `generate_tangents` to be compared against
     // the reference C implementation without any additional tooling.
     #[cfg(test)]
@@ -62,127 +60,43 @@ pub fn generate_tangents<G: Geometry>(geometry: &mut G) -> bool {
     generate_tangents_with(geometry, -1.0)
 }
 
-fn generate_tangents_with<G: Geometry>(geometry: &mut G, thres_cos: f32) -> bool {
-    // count triangles on supported faces
-    let mut triangles_count = 0;
+/// Generates tangents for the input geometry and a given `cos(angular_threshold)`.
+fn generate_tangents_with<G: Geometry>(geometry: &mut G, thres_cos: f32) {
+    let (mut triangles, mut vertices, tspaces_count) = generate_initial_vertices(geometry);
+
+    weld_vertices(geometry, &mut vertices);
+
+    let info = split_degenerate(geometry, &mut triangles, &mut vertices);
+
+    init_tri_info(geometry, info.good_triangles, info.good_vertices);
+
+    // Groups allocate their own buffers out of this arena
+    let mut group_buffer = vec![0; info.good_vertices.len()];
+
+    let mut groups =
+        build_4_rule_groups(info.good_triangles, &mut group_buffer, info.good_vertices);
+
+    let mut tspaces = generate_tspaces(
+        geometry,
+        tspaces_count,
+        info.good_triangles,
+        &mut groups,
+        info.good_vertices,
+        thres_cos,
+    );
+
+    approximate_degenerate_triangles(geometry, &mut tspaces, info);
+
+    let mut tspaces = tspaces.into_iter();
     for face in 0..geometry.num_faces() {
         let verts = geometry.num_vertices_of_face(face);
-        if verts == 3 {
-            triangles_count += 1;
-        } else if verts == 4 {
-            triangles_count += 2;
-        }
-    }
-
-    // make an initial triangle --> face index list
-    let (mut triangles_info, mut vertex_indices, tspaces_count) =
-        generate_initial_vertex_indices(geometry, triangles_count);
-
-    // make a welded index list of identical positions and attributes (pos, norm, texc)
-    generate_shared_vertices_index_list(&mut vertex_indices, geometry, triangles_count);
-
-    // Mark all degenerate triangles
-    let total_triangles_count = triangles_count;
-    let mut degen_triangles_count = 0;
-    for triangle in 0..total_triangles_count {
-        let i0 = vertex_indices[triangle * 3];
-        let i1 = vertex_indices[triangle * 3 + 1];
-        let i2 = vertex_indices[triangle * 3 + 2];
-        let p0 = get_position(geometry, i0 as usize);
-        let p1 = get_position(geometry, i1 as usize);
-        let p2 = get_position(geometry, i2 as usize);
-
-        if p0 == p1 || p0 == p2 || p1 == p2 {
-            triangles_info[triangle]
-                .flags
-                .set(TriangleFlags::MARK_DEGENERATE, true);
-            degen_triangles_count += 1;
-        }
-    }
-    triangles_count = total_triangles_count - degen_triangles_count;
-
-    // mark all triangle pairs that belong to a quad with only one
-    // good triangle. These need special treatment in DegenEpilogue().
-    // Additionally, move all good triangles to the start of
-    // pTriInfos[] and piTriListIn[] without changing order and
-    // put the degenerate triangles last.
-    degen_prologue(
-        &mut triangles_info,
-        &mut vertex_indices,
-        triangles_count as i32,
-        total_triangles_count as i32,
-    );
-
-    // evaluate triangle level attributes and neighbor list
-    init_tri_info(
-        geometry,
-        &mut triangles_info,
-        &vertex_indices,
-        triangles_count,
-    );
-
-    // based on the 4 rules, identify groups based on connectivity
-    let max_groups = triangles_count * 3;
-    let mut groups = vec![Group::zero(); max_groups];
-    let mut face_indices_buffer = vec![0; triangles_count * 3];
-
-    let active_groups = build_4_rule_groups(
-        &mut triangles_info,
-        &mut groups,
-        &mut face_indices_buffer,
-        &vertex_indices,
-        triangles_count as i32,
-    );
-
-    let mut tspaces = vec![
-        TSpace {
-            os: [1.0, 0.0, 0.0],
-            mag_s: 1.0,
-            ot: [0.0, 1.0, 0.0],
-            mag_t: 1.0,
-            ..TSpace::zero()
-        };
-        tspaces_count as usize
-    ];
-
-    // make tspaces, each group is split up into subgroups if necessary
-    // based on fAngularThreshold. Finally a tangent space is made for
-    // every resulting subgroup
-    generate_tspaces(
-        geometry,
-        &mut tspaces,
-        &triangles_info,
-        &mut groups,
-        active_groups,
-        &vertex_indices,
-        thres_cos,
-        &face_indices_buffer,
-    );
-
-    // degenerate quads with one good triangle will be fixed by copying a space from
-    // the good triangle to the coinciding vertex.
-    // all other degenerate triangles will just copy a space from any good triangle
-    // with the same welded index in piTriListIn[].
-    degen_epilogue(
-        geometry,
-        &mut tspaces,
-        &mut triangles_info,
-        &vertex_indices,
-        triangles_count as i32,
-        total_triangles_count as i32,
-    );
-
-    let mut index = 0;
-    for face in 0..geometry.num_faces() {
-        let verts_0 = geometry.num_vertices_of_face(face);
-        if !(verts_0 != 3 && verts_0 != 4) {
+        if verts == 3 || verts == 4 {
             // I've decided to let degenerate triangles and group-with-anythings
             // vary between left/right hand coordinate systems at the vertices.
             // All healthy triangles on the other hand are built to always be either or.
 
             // set data
-            for i in 0..verts_0 {
-                let tspace = &tspaces[index];
+            for (vert, tspace) in (0..verts).zip(&mut tspaces) {
                 geometry.set_tangent(
                     tspace.os,
                     tspace.ot,
@@ -190,32 +104,39 @@ fn generate_tangents_with<G: Geometry>(geometry: &mut G, thres_cos: f32) -> bool
                     tspace.mag_t,
                     tspace.orient,
                     face,
-                    i,
+                    vert,
                 );
-                index += 1;
             }
         }
     }
-
-    true
 }
 
-#[derive(Copy, Clone)]
-struct TriangleInfo {
-    face_neighbors: [i32; 3],
-    assigned_group: [usize; 3],
-    os: [f32; 3],
-    ot: [f32; 3],
+struct TriangleInfo<V: VectorSpace> {
+    face_neighbors: [Option<usize>; 3],
+    assigned_group: [Option<usize>; 3],
+    os: V::Vec3,
+    ot: V::Vec3,
     mag_s: f32,
     mag_t: f32,
     /// Index of the face this triangle maps to, in the original faces.
-    original_face_index: i32,
+    original_face_index: usize,
     flags: TriangleFlags,
     /// Offset of the first vertex of this triangle, in the original vertices.
-    vertex_offset: i32,
-    /// Offsets of the vertices of this triangle, relative to the triangle index, last always 0.
-    vertex_indices: [u8; 4],
+    vertex_offset: usize,
+    /// Offsets of the vertices of this triangle, relative to the triangle index
+    vertex_indices: [u8; 3],
 }
+
+impl<V: VectorSpace> Clone for TriangleInfo<V>
+where
+    V::Vec3: Copy,
+{
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<V: VectorSpace> Copy for TriangleInfo<V> where V::Vec3: Copy {}
 
 bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -227,174 +148,159 @@ bitflags! {
     }
 }
 
-impl TriangleInfo {
+impl<V: VectorSpace> TriangleInfo<V> {
     fn zero() -> Self {
         Self {
-            face_neighbors: [0, 0, 0],
-            assigned_group: [usize::MAX, usize::MAX, usize::MAX],
-            os: Default::default(),
-            ot: Default::default(),
+            face_neighbors: [None; 3],
+            assigned_group: [None; 3],
+            os: [0.; 3].into(),
+            ot: [0.; 3].into(),
             mag_s: 0.0,
             mag_t: 0.0,
             original_face_index: 0,
             flags: TriangleFlags::empty(),
             vertex_offset: 0,
-            vertex_indices: [0, 0, 0, 0],
+            vertex_indices: [0; 3],
         }
     }
 }
 
 /// Generate initial triangles and vertex indices, from original geometry.
-fn generate_initial_vertex_indices<G: Geometry>(
-    geometry: &mut G,
-    triangles_count: usize,
-) -> (Vec<TriangleInfo>, Vec<i32>, i32) {
-    let mut triangles_info = vec![TriangleInfo::zero(); triangles_count];
-    let mut vertex_indices = vec![0i32; 3 * triangles_count];
+fn generate_initial_vertices<G: Geometry>(
+    geometry: &G,
+) -> (Vec<TriangleInfo<G::Space>>, Vec<usize>, usize) {
+    let triangles_count = geometry
+        .face_indices()
+        .map(|face| geometry.num_vertices_of_face(face))
+        .map(|verts| match verts {
+            3 => 1,
+            4 => 2,
+            // Unsupported face-types
+            _ => 0,
+        })
+        .sum::<usize>();
+
+    let mut triangles_info = Vec::with_capacity(triangles_count);
+    let mut vertex_indices = Vec::with_capacity(3 * triangles_count);
 
     let mut vertex_offset = 0;
-    let mut triangle_index = 0;
 
-    for face_index in 0..geometry.num_faces() {
-        let face_vertices_count = geometry.num_vertices_of_face(face_index);
+    for original_face_index in geometry.face_indices() {
+        let mut face_vertex_indices = geometry.vertex_indices(original_face_index);
 
-        // Only generate for tris or quads
-        if face_vertices_count != 3 && face_vertices_count != 4 {
-            continue;
-        }
+        let mut tri_info_a = TriangleInfo {
+            original_face_index,
+            vertex_offset,
+            ..TriangleInfo::zero()
+        };
 
-        triangles_info[triangle_index].original_face_index = face_index as i32;
-        triangles_info[triangle_index].vertex_offset = vertex_offset;
+        vertex_offset += face_vertex_indices.len();
 
-        if face_vertices_count == 3 {
-            // For tris
+        match face_vertex_indices.len() {
+            3 => {
+                // For tris
+                tri_info_a.vertex_indices = [0, 1, 2];
 
-            triangles_info[triangle_index].vertex_indices = [0, 1, 2, 0];
-            vertex_indices[triangle_index * 3] = face_vertex_to_index(face_index, 0) as i32;
-            vertex_indices[triangle_index * 3 + 1] = face_vertex_to_index(face_index, 1) as i32;
-            vertex_indices[triangle_index * 3 + 2] = face_vertex_to_index(face_index, 2) as i32;
-
-            triangle_index += 1;
-        } else {
-            // For quads
-
-            triangles_info[triangle_index + 1].original_face_index = face_index as i32;
-            triangles_info[triangle_index + 1].vertex_offset = vertex_offset;
-
-            let i0 = face_vertex_to_index(face_index, 0);
-            let i1 = face_vertex_to_index(face_index, 1);
-            let i2 = face_vertex_to_index(face_index, 2);
-            let i3 = face_vertex_to_index(face_index, 3);
-
-            // Figure out the best cut for the quad
-            let t0 = get_tex_coord(geometry, i0);
-            let t1 = get_tex_coord(geometry, i1);
-            let t2 = get_tex_coord(geometry, i2);
-            let t3 = get_tex_coord(geometry, i3);
-            let length_squared_02: f32 = distance_squared(t2, t0);
-            let length_squared_13: f32 = distance_squared(t3, t1);
-            let quad_diagonal_is_02;
-
-            if length_squared_02 < length_squared_13 {
-                quad_diagonal_is_02 = true;
-            } else if length_squared_13 < length_squared_02 {
-                quad_diagonal_is_02 = false;
-            } else {
-                let p0 = get_position(geometry, i0);
-                let p1 = get_position(geometry, i1);
-                let p2 = get_position(geometry, i2);
-                let p3 = get_position(geometry, i3);
-                let length_squared_02_0: f32 = distance_squared(p2, p0);
-                let length_squared_13_0: f32 = distance_squared(p3, p1);
-                quad_diagonal_is_02 = length_squared_13_0 >= length_squared_02_0;
+                triangles_info.push(tri_info_a);
+                vertex_indices.extend(face_vertex_indices);
             }
+            4 => {
+                // For quads
+                let mut tri_info_b = tri_info_a;
 
-            // Apply indices for the cut we determined
-            if quad_diagonal_is_02 {
-                triangles_info[triangle_index].vertex_indices = [0, 1, 2, 0];
-                vertex_indices[triangle_index * 3] = i0 as i32;
-                vertex_indices[triangle_index * 3 + 1] = i1 as i32;
-                vertex_indices[triangle_index * 3 + 2] = i2 as i32;
-                triangle_index += 1;
+                let i = [(); 4].map(|_| face_vertex_indices.next().unwrap());
+                let t = i.map(|i| geometry.tex_coord_by_index(i));
 
-                triangles_info[triangle_index].vertex_indices = [0, 2, 3, 0];
-                vertex_indices[triangle_index * 3] = i0 as i32;
-                vertex_indices[triangle_index * 3 + 1] = i2 as i32;
-                vertex_indices[triangle_index * 3 + 2] = i3 as i32;
-                triangle_index += 1;
-            } else {
-                triangles_info[triangle_index].vertex_indices = [0, 1, 3, 0];
-                vertex_indices[triangle_index * 3] = i0 as i32;
-                vertex_indices[triangle_index * 3 + 1] = i1 as i32;
-                vertex_indices[triangle_index * 3 + 2] = i3 as i32;
-                triangle_index += 1;
+                // Figure out the best cut for the quad
+                let quad_diagonal_is_02 = match G::Space::distance_squared(t[2], t[0])
+                    .total_cmp(&G::Space::distance_squared(t[3], t[1]))
+                {
+                    core::cmp::Ordering::Less => true,
+                    core::cmp::Ordering::Greater => false,
+                    core::cmp::Ordering::Equal => {
+                        let p = i.map(|i| geometry.position_by_index(i));
+                        G::Space::distance_squared(p[3], p[1])
+                            >= G::Space::distance_squared(p[2], p[0])
+                    }
+                };
 
-                triangles_info[triangle_index].vertex_indices = [1, 2, 3, 0];
-                vertex_indices[triangle_index * 3] = i1 as i32;
-                vertex_indices[triangle_index * 3 + 1] = i2 as i32;
-                vertex_indices[triangle_index * 3 + 2] = i3 as i32;
-                triangle_index += 1;
+                // Apply indices for the cut we determined
+                if quad_diagonal_is_02 {
+                    tri_info_a.vertex_indices = [0, 1, 2];
+                    tri_info_b.vertex_indices = [0, 2, 3];
+                } else {
+                    tri_info_a.vertex_indices = [0, 1, 3];
+                    tri_info_b.vertex_indices = [1, 2, 3];
+                }
+
+                triangles_info.push(tri_info_a);
+                triangles_info.push(tri_info_b);
+                vertex_indices.extend_from_slice(&tri_info_a.vertex_indices.map(|i| i as usize));
+                vertex_indices.extend_from_slice(&tri_info_b.vertex_indices.map(|i| i as usize));
+            }
+            _ => {
+                // Only generate for tris or quads
+                continue;
             }
         }
-
-        vertex_offset += face_vertices_count as i32;
-    }
-
-    for face_info in &mut triangles_info {
-        face_info.flags = TriangleFlags::empty();
     }
 
     (triangles_info, vertex_indices, vertex_offset)
 }
 
-// Mikktspace uses indices internally to refer to and identify vertices, these utility functions
-// make it easier to work with these indices.
-
-/// Generate a vertex index for the Nth vertex of the Nth face.
-fn face_vertex_to_index(face_index: usize, vertex: usize) -> usize {
-    face_index << 2 | vertex & 0x3
-}
-
-/// Reverse of `face_vertex_to_index`.
-fn index_to_face_vertex(index: usize) -> (usize, usize) {
-    (index >> 2, index & 0x3)
-}
-
-fn get_position<G: Geometry>(geometry: &mut G, index: usize) -> [f32; 3] {
-    let (face, vert) = index_to_face_vertex(index);
-    geometry.position(face, vert)
-}
-
-fn get_tex_coord<G: Geometry>(geometry: &mut G, index: usize) -> [f32; 3] {
-    let (face, vert) = index_to_face_vertex(index);
-    let tex_coord = geometry.tex_coord(face, vert);
-    [tex_coord[0], tex_coord[1], 1.0]
-}
-
-fn get_normal<G: Geometry>(geometry: &mut G, index: usize) -> [f32; 3] {
-    let (face, vert) = index_to_face_vertex(index);
-    geometry.normal(face, vert)
-}
-
-#[derive(Copy, Clone)]
-struct TSpace {
-    os: [f32; 3],
+struct TSpace<V: VectorSpace> {
+    os: V::Vec3,
     mag_s: f32,
-    ot: [f32; 3],
+    ot: V::Vec3,
     mag_t: f32,
-    counter: i32,
+    counter: u8,
     orient: bool,
 }
 
-impl TSpace {
+impl<V: VectorSpace> Clone for TSpace<V>
+where
+    V::Vec3: Copy,
+{
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<V: VectorSpace> Copy for TSpace<V> where V::Vec3: Copy {}
+
+impl<V: VectorSpace> TSpace<V> {
     fn zero() -> Self {
         Self {
-            os: Default::default(),
+            os: [0.; 3].into(),
             mag_s: 0.0,
-            ot: Default::default(),
+            ot: [0.; 3].into(),
             mag_t: 0.0,
             counter: 0,
             orient: false,
+        }
+    }
+
+    fn mean(self, other: Self) -> Self {
+        if self.mag_s == other.mag_s
+            && self.mag_t == other.mag_t
+            && self.os == other.os
+            && self.ot == other.ot
+        {
+            Self {
+                mag_s: self.mag_s,
+                mag_t: self.mag_t,
+                os: self.os,
+                ot: self.ot,
+                ..Self::zero()
+            }
+        } else {
+            Self {
+                mag_s: 0.5 * (self.mag_s + other.mag_s),
+                mag_t: 0.5 * (self.mag_t + other.mag_t),
+                os: V::normalize_or_zero(self.os + other.os),
+                ot: V::normalize_or_zero(self.ot + other.ot),
+                ..Self::zero()
+            }
         }
     }
 }
@@ -431,33 +337,20 @@ impl TSpace {
 // internal structure
 
 #[derive(Copy, Clone)]
-struct Group {
-    face_indices_len: usize,
-    /// Index of the first face index in the buffer.
-    face_indices_index: usize,
-    vertex_representative: i32,
-    orient_preservering: bool,
+struct Group<'a> {
+    face_indices: &'a [usize],
+    vertex_representative: usize,
+    orient_preserving: bool,
 }
 
-impl Group {
-    fn zero() -> Self {
-        Self {
-            face_indices_len: 0,
-            face_indices_index: usize::MAX,
-            vertex_representative: 0,
-            orient_preservering: false,
-        }
-    }
-}
-
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct SubGroup {
-    faces_count: i32,
-    tri_members: Vec<i32>,
+    faces_count: usize,
+    tri_members: Vec<usize>,
 }
 
 impl SubGroup {
-    fn zero() -> Self {
+    const fn zero() -> Self {
         Self {
             faces_count: 0,
             tri_members: Vec::new(),
@@ -465,1326 +358,672 @@ impl SubGroup {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 struct Edge {
-    i0: i32,
-    i1: i32,
-    f: i32,
+    /// Index of the starting vertex
+    i0: usize,
+    /// Index of the ending vertex
+    i1: usize,
+    /// Index of the face this edge belongs to
+    face: usize,
 }
 
-impl Edge {
-    fn zero() -> Self {
-        Self { i0: 0, i1: 0, f: 0 }
-    }
+impl Ord for Edge {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        use core::cmp::Ordering::Equal;
 
-    fn channel(&self, i: i32) -> i32 {
-        [self.i0, self.i1, self.f][i as usize]
-    }
-}
-
-#[derive(Copy, Clone)]
-struct TmpVert {
-    vert: [f32; 3],
-    index: i32,
-}
-
-impl TmpVert {
-    fn zero() -> Self {
-        Self {
-            vert: [0.0, 0.0, 0.0],
-            index: 0,
+        match self.i0.cmp(&other.i0) {
+            Equal => match self.i1.cmp(&other.i1) {
+                Equal => self.face.cmp(&other.face),
+                ord => ord,
+            },
+            ord => ord,
         }
     }
 }
 
-fn degen_epilogue<G: Geometry>(
-    geometry: &mut G,
-    tspaces: &mut [TSpace],
-    triangles_info: &mut [TriangleInfo],
-    vertex_indices: &[i32],
-    triangles_count: i32,
-    total_triangles_count: i32,
+impl PartialOrd for Edge {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Set the tangent space values of degenerate triangles based on connected good triangles.
+///
+/// Degenerate quads with one good triangle will be fixed by copying a space from
+/// the good triangle to the coinciding vertex.
+/// All other degenerate triangles will just copy a space from any good triangle
+/// with the same welded index.
+fn approximate_degenerate_triangles<G: Geometry>(
+    geometry: &G,
+    tspaces: &mut [TSpace<G::Space>],
+    info: Info<'_, G::Space>,
 ) {
     // deal with degenerate triangles
     // punishment for degenerate triangles is O(N^2)
-    for t in triangles_count..total_triangles_count {
-        // degenerate triangles on a quad with one good triangle are skipped
-        // here but processed in the next loop
-        let skip = triangles_info[t as usize]
-            .flags
-            .contains(TriangleFlags::QUAD_ONE_DEGEN_TRI);
+    // degenerate triangles on a quad with one good triangle are skipped
+    // here but processed in the next loop
+    let full_bad = info
+        .degenerate_triangles
+        .iter()
+        .enumerate()
+        .filter(|(_, triangle)| !triangle.flags.contains(TriangleFlags::QUAD_ONE_DEGEN_TRI))
+        .flat_map(|(t, a)| (0..3).map(move |i| (t, a, i)))
+        .map(|(t, a, i)| (info.degenerate_vertices[t * 3 + i], a, i))
+        .filter_map(|(degen_index, a, i)| {
+            info.good_vertices
+                .iter()
+                .enumerate()
+                .find(|&(_, &index)| index == degen_index)
+                .map(|(j, _)| (i, j, a))
+        })
+        .map(|(i, j, a)| {
+            let b = &info.good_triangles[j / 3];
+            let j = j % 3;
 
-        if !skip {
-            for i in 0..3 {
-                let index1: i32 = vertex_indices[(t * 3i32 + i) as usize];
-                let mut not_found: bool = true;
-                let mut j: i32 = 0i32;
-                while not_found && j < 3i32 * triangles_count {
-                    let index2: i32 = vertex_indices[j as usize];
-                    if index1 == index2 {
-                        not_found = false;
-                    } else {
-                        j += 1;
-                    }
-                }
-                if !not_found {
-                    let tri: i32 = j / 3i32;
-                    let vert: i32 = j % 3i32;
-                    let src_vert: i32 =
-                        triangles_info[tri as usize].vertex_indices[vert as usize] as i32;
-                    let src_offs: i32 = triangles_info[tri as usize].vertex_offset;
-                    let dst_vert: i32 =
-                        triangles_info[t as usize].vertex_indices[i as usize] as i32;
-                    let dst_offs: i32 = triangles_info[t as usize].vertex_offset;
-                    tspaces[(dst_offs + dst_vert) as usize] =
-                        tspaces[(src_offs + src_vert) as usize];
-                }
-            }
-        }
-    }
+            let dst = a.vertex_indices[i] as usize + a.vertex_offset;
+            let src = b.vertex_indices[j] as usize + b.vertex_offset;
+
+            (dst, src)
+        });
 
     // deal with degenerate quads with one good triangle
-    for t in 0..triangles_count {
-        // this triangle belongs to a quad where the
-        // other triangle is degenerate
-        if triangles_info[t as usize]
-            .flags
-            .contains(TriangleFlags::QUAD_ONE_DEGEN_TRI)
-        {
-            let pv = triangles_info[t as usize].vertex_indices;
-            let flag = (1 << pv[0]) | (1 << pv[1]) | (1 << pv[2]);
-            let mut missing_index: i32 = 0i32;
-            if flag & 2i32 == 0i32 {
-                missing_index = 1i32;
-            } else if flag & 4i32 == 0i32 {
-                missing_index = 2i32;
-            } else if flag & 8i32 == 0i32 {
-                missing_index = 3i32;
-            }
-            let org_f = triangles_info[t as usize].original_face_index;
-            let v_dst_p = get_position(
-                geometry,
-                face_vertex_to_index(org_f as usize, missing_index as usize),
-            );
+    // this triangle belongs to a quad where the
+    // other triangle is degenerate
+    let partial_bad = info
+        .degenerate_triangles
+        .iter()
+        .filter(|triangle| triangle.flags.contains(TriangleFlags::QUAD_ONE_DEGEN_TRI))
+        .filter_map(|info| {
+            let a = (0..4)
+                .find(|index| !info.vertex_indices.contains(index))
+                .unwrap() as usize;
 
-            let mut not_found = true;
-            let mut i_0 = 0i32;
-            while not_found && i_0 < 3i32 {
-                let vert: i32 = pv[i_0 as usize] as i32;
-                let v_src_p = get_position(
-                    geometry,
-                    face_vertex_to_index(org_f as usize, vert as usize),
-                );
-                if v_src_p == v_dst_p {
-                    let offs: i32 = triangles_info[t as usize].vertex_offset;
-                    tspaces[(offs + missing_index) as usize] = tspaces[(offs + vert) as usize];
-                    not_found = false;
-                } else {
-                    i_0 += 1;
-                }
-            }
-        }
+            info.vertex_indices
+                .iter()
+                .map(|&b| b as usize)
+                .find(|&b| {
+                    geometry.position(info.original_face_index, a)
+                        == geometry.position(info.original_face_index, b)
+                })
+                .map(|b| (info.vertex_offset + a, info.vertex_offset + b))
+        });
+
+    for (dst, src) in full_bad.chain(partial_bad) {
+        tspaces[dst] = tspaces[src];
     }
 }
 
-#[expect(clippy::too_many_arguments, reason = "a lot of arguments are needed")]
+/// Make tspaces, each group is split up into subgroups if necessary
+/// based on `angular_threshold`.
+/// Finally a tangent space is made for every resulting subgroup.
 fn generate_tspaces<G: Geometry>(
-    geometry: &mut G,
-    tspaces: &mut [TSpace],
-    triangles_info: &[TriangleInfo],
+    geometry: &G,
+    tspaces_count: usize,
+    triangles_info: &[TriangleInfo<G::Space>],
     groups: &mut [Group],
-    active_groups: i32,
-    vertex_indices: &[i32],
+    vertex_indices: &[usize],
     thres_cos: f32,
-    face_indices_buffer: &[i32],
-) {
-    let mut max_faces_count: usize = 0;
-    for g in 0..active_groups {
-        if max_faces_count < groups[g as usize].face_indices_len {
-            max_faces_count = groups[g as usize].face_indices_len;
-        }
-    }
+) -> Vec<TSpace<G::Space>> {
+    let mut tspaces = vec![
+        TSpace {
+            os: [1.0, 0.0, 0.0].into(),
+            mag_s: 1.0,
+            ot: [0.0, 1.0, 0.0].into(),
+            mag_t: 1.0,
+            ..TSpace::zero()
+        };
+        tspaces_count
+    ];
+
+    let max_faces_count = groups
+        .iter()
+        .map(|group| group.face_indices.len())
+        .max()
+        .unwrap_or(0);
+
     if max_faces_count == 0 {
-        return;
+        return tspaces;
     }
 
     let mut sub_group_tspace = vec![TSpace::zero(); max_faces_count];
     let mut uni_sub_groups = vec![SubGroup::zero(); max_faces_count];
-    let mut tmp_members = vec![0i32; max_faces_count];
+    let mut tmp_members = vec![0; max_faces_count];
 
-    for g in 0..active_groups {
-        let group = &mut groups[g as usize];
+    for (g, group) in groups.iter_mut().enumerate() {
         let mut unique_sub_groups = 0;
-        for i in 0..group.face_indices_len as i32 {
-            let offset = group.face_indices_index + i as usize;
-            let f: i32 = face_indices_buffer[offset];
 
-            let mut index: i32 = -1i32;
-            let mut tmp_group: SubGroup = SubGroup {
-                faces_count: 0,
-                tri_members: Vec::new(),
+        let face_indices = group.face_indices;
+
+        for &f in face_indices {
+            let a = &triangles_info[f];
+
+            let index = a
+                .assigned_group
+                .iter()
+                .position(|&group| group == Some(g))
+                .unwrap();
+
+            let vertex_index = vertex_indices[f * 3 + index];
+            let n = geometry.normal_by_index(vertex_index);
+            let a_v_os = G::Space::normalize_or_zero(G::Space::project(a.os, n));
+            let a_v_ot = G::Space::normalize_or_zero(G::Space::project(a.ot, n));
+
+            let members = face_indices
+                .iter()
+                .copied()
+                .filter(|&t| {
+                    let b = &triangles_info[t];
+                    let b_v_os = G::Space::normalize_or_zero(G::Space::project(b.os, n));
+                    let b_v_ot = G::Space::normalize_or_zero(G::Space::project(b.ot, n));
+
+                    let flags = a.flags | b.flags;
+                    let any = flags.contains(TriangleFlags::GROUP_WITH_ANY);
+                    // make sure triangles which belong to the same quad are joined.
+                    let same_org_face = a.original_face_index == b.original_face_index;
+                    let cos_s = G::Space::dot(a_v_os, b_v_os);
+                    let cos_t = G::Space::dot(a_v_ot, b_v_ot);
+                    any || same_org_face || cos_s > thres_cos && cos_t > thres_cos
+                })
+                .fold(0, |members, t| {
+                    tmp_members[members] = t;
+                    members + 1
+                });
+
+            tmp_members[0..members].sort();
+
+            let tmp_group = SubGroup {
+                faces_count: members,
+                tri_members: tmp_members.clone(),
             };
-            if triangles_info[f as usize].assigned_group[0] == g as usize {
-                index = 0i32;
-            } else if triangles_info[f as usize].assigned_group[1] == g as usize {
-                index = 1i32;
-            } else if triangles_info[f as usize].assigned_group[2] == g as usize {
-                index = 2i32;
-            }
-            let vertex_index = vertex_indices[(f * 3 + index) as usize];
-            let n = get_normal(geometry, vertex_index as usize);
-            let mut v_os = project(triangles_info[f as usize].os, n);
-            let mut v_ot = project(triangles_info[f as usize].ot, n);
-            if v_not_zero(v_os) {
-                v_os = normalize(v_os);
-            }
-            if v_not_zero(v_ot) {
-                v_ot = normalize(v_ot);
-            }
-            let of_1 = triangles_info[f as usize].original_face_index;
-            let mut members = 0;
-            for j in 0..group.face_indices_len as i32 {
-                let offset = group.face_indices_index + j as usize;
-                let t: i32 = face_indices_buffer[offset];
 
-                let of_2: i32 = triangles_info[t as usize].original_face_index;
-                let mut v_os2 = project(triangles_info[t as usize].os, n);
-                let mut v_ot2 = project(triangles_info[t as usize].ot, n);
-                if v_not_zero(v_os2) {
-                    v_os2 = normalize(v_os2);
-                }
-                if v_not_zero(v_ot2) {
-                    v_ot2 = normalize(v_ot2);
-                }
+            let l = uni_sub_groups
+                .iter()
+                .take(unique_sub_groups)
+                .position(|group| group == &tmp_group);
 
-                let flags = triangles_info[f as usize].flags | triangles_info[t as usize].flags;
-                let any = flags.contains(TriangleFlags::GROUP_WITH_ANY);
-                // make sure triangles which belong to the same quad are joined.
-                let same_org_face: bool = of_1 == of_2;
-                let cos_s: f32 = dot(v_os, v_os2);
-                let cos_t: f32 = dot(v_ot, v_ot2);
-                if any || same_org_face || cos_s > thres_cos && cos_t > thres_cos {
-                    let fresh0 = members;
-                    members += 1;
-                    tmp_members[fresh0] = t;
-                }
-            }
-            if members > 1 {
-                let seed: u32 = 39871946i32 as u32;
-                quick_sort(&mut tmp_members, 0i32, (members - 1) as i32, seed);
-            }
-            tmp_group.faces_count = members as i32;
-            tmp_group.tri_members = tmp_members.clone();
-            let mut found = false;
-            let mut l = 0;
-            while l < unique_sub_groups && !found {
-                found = compare_sub_groups(&tmp_group, &uni_sub_groups[l]);
-                if !found {
-                    l += 1;
-                }
-            }
-            if !found {
-                uni_sub_groups[unique_sub_groups].faces_count = members as i32;
+            if l.is_none() {
+                uni_sub_groups[unique_sub_groups].faces_count = members;
                 uni_sub_groups[unique_sub_groups].tri_members = tmp_group.tri_members.clone();
 
                 sub_group_tspace[unique_sub_groups] = eval_tspace(
                     geometry,
-                    &tmp_group.tri_members,
-                    members as i32,
+                    &tmp_group.tri_members[..members],
                     vertex_indices,
                     triangles_info,
                     group.vertex_representative,
                 );
                 unique_sub_groups += 1;
             }
-            let offs = triangles_info[f as usize].vertex_offset as usize;
-            let vert = triangles_info[f as usize].vertex_indices[index as usize] as usize;
 
-            let tspaces_out = &mut tspaces[offs + vert];
-            if tspaces_out.counter == 1i32 {
-                *tspaces_out = avg_tspace(tspaces_out, &sub_group_tspace[l]);
-                tspaces_out.counter = 2i32;
-                tspaces_out.orient = group.orient_preservering;
+            let sub_tspace = sub_group_tspace[l.unwrap_or(unique_sub_groups - 1)];
+
+            let index = a.vertex_indices[index] as usize + a.vertex_offset;
+
+            let tspaces_out = &mut tspaces[index];
+            let sub_tspace = if tspaces_out.counter == 1 {
+                tspaces_out.mean(sub_tspace)
             } else {
-                *tspaces_out = sub_group_tspace[l];
-                tspaces_out.counter = 1i32;
-                tspaces_out.orient = group.orient_preservering;
-            }
-        }
-    }
-}
+                sub_tspace
+            };
 
-fn avg_tspace(tspace0: &TSpace, tspace1: &TSpace) -> TSpace {
-    let mut ts_res: TSpace = TSpace {
-        os: [0.0, 0.0, 0.0],
-        mag_s: 0.,
-        ot: [0.0, 0.0, 0.0],
-        mag_t: 0.,
-        counter: 0,
-        orient: false,
-    };
-    if tspace0.mag_s == tspace1.mag_s
-        && tspace0.mag_t == tspace1.mag_t
-        && tspace0.os == tspace1.os
-        && tspace0.ot == tspace1.ot
-    {
-        ts_res.mag_s = tspace0.mag_s;
-        ts_res.mag_t = tspace0.mag_t;
-        ts_res.os = tspace0.os;
-        ts_res.ot = tspace0.ot;
-    } else {
-        ts_res.mag_s = 0.5f32 * (tspace0.mag_s + tspace1.mag_s);
-        ts_res.mag_t = 0.5f32 * (tspace0.mag_t + tspace1.mag_t);
-        ts_res.os = add(tspace0.os, tspace1.os);
-        ts_res.ot = add(tspace0.ot, tspace1.ot);
-        if v_not_zero(ts_res.os) {
-            ts_res.os = normalize(ts_res.os);
-        }
-        if v_not_zero(ts_res.ot) {
-            ts_res.ot = normalize(ts_res.ot);
+            *tspaces_out = TSpace {
+                counter: tspaces_out.counter + 1,
+                orient: group.orient_preserving,
+                ..sub_tspace
+            };
         }
     }
-    ts_res
+
+    tspaces
 }
 
 fn eval_tspace<G: Geometry>(
-    geometry: &mut G,
-    face_indices_buffer: &[i32],
-    faces_count: i32,
-    vertex_indices: &[i32],
-    triangles_info: &[TriangleInfo],
-    vertex_representative: i32,
-) -> TSpace {
-    let mut res: TSpace = TSpace {
-        os: [0.0, 0.0, 0.0],
-        mag_s: 0.,
-        ot: [0.0, 0.0, 0.0],
-        mag_t: 0.,
-        counter: 0,
-        orient: false,
-    };
-    let mut angle_sum: f32 = 0i32 as f32;
-    for face in 0..faces_count {
-        let f: i32 = face_indices_buffer[face as usize];
+    geometry: &G,
+    face_indices_buffer: &[usize],
+    vertices: &[usize],
+    triangles_info: &[TriangleInfo<G::Space>],
+    vertex_representative: usize,
+) -> TSpace<G::Space> {
+    let chunks = vertices.chunks_exact(3).zip(triangles_info);
 
-        // only valid triangles get to add their contribution
-        if !triangles_info[f as usize]
-            .flags
-            .contains(TriangleFlags::GROUP_WITH_ANY)
-        {
-            let mut i: i32 = -1i32;
-            if vertex_indices[(3i32 * f) as usize] == vertex_representative {
-                i = 0i32;
-            } else if vertex_indices[(3i32 * f + 1i32) as usize] == vertex_representative {
-                i = 1i32;
-            } else if vertex_indices[(3i32 * f + 2i32) as usize] == vertex_representative {
-                i = 2i32;
-            }
-            let index = vertex_indices[(3i32 * f + i) as usize];
-            let n = get_normal(geometry, index as usize);
-            let mut v_os = project(triangles_info[f as usize].os, n);
-            let mut v_ot = project(triangles_info[f as usize].ot, n);
-            if v_not_zero(v_os) {
-                v_os = normalize(v_os);
-            }
-            if v_not_zero(v_ot) {
-                v_ot = normalize(v_ot);
-            }
-            let i2 = vertex_indices[(3i32 * f + if i < 2i32 { i + 1i32 } else { 0i32 }) as usize];
-            let i1 = vertex_indices[(3i32 * f + i) as usize];
-            let i0 = vertex_indices[(3i32 * f + if i > 0i32 { i - 1i32 } else { 2i32 }) as usize];
-            let p0 = get_position(geometry, i0 as usize);
-            let p1 = get_position(geometry, i1 as usize);
-            let p2 = get_position(geometry, i2 as usize);
-            let v1 = subtract(p0, p1);
-            let v2 = subtract(p2, p1);
-            let mut v1 = project(v1, n);
-            if v_not_zero(v1) {
-                v1 = normalize(v1);
-            }
-            let mut v2 = project(v2, n);
-            if v_not_zero(v2) {
-                v2 = normalize(v2);
-            }
-            let cos = dot(v1, v2).clamp(-1.0, 1.0);
-            let angle = acos(cos as f64) as f32;
-            let mag_s = triangles_info[f as usize].mag_s;
-            let mag_t = triangles_info[f as usize].mag_t;
-            res.os = add(res.os, multiply(v_os, angle));
-            res.ot = add(res.ot, multiply(v_ot, angle));
-            res.mag_s += angle * mag_s;
-            res.mag_t += angle * mag_t;
-            angle_sum += angle;
-        }
-    }
-    if v_not_zero(res.os) {
-        res.os = normalize(res.os);
-    }
-    if v_not_zero(res.ot) {
-        res.ot = normalize(res.ot);
-    }
-    if angle_sum > 0i32 as f32 {
+    let (mut res, angle_sum) = face_indices_buffer
+        .iter()
+        .map(|&f| chunks.clone().nth(f).unwrap())
+        .filter(|(_vertex_indices, info)| {
+            // only valid triangles get to add their contribution
+            !info.flags.contains(TriangleFlags::GROUP_WITH_ANY)
+        })
+        .fold(
+            (TSpace::zero(), 0.),
+            |(mut res, angle_sum), (vertices, info)| {
+                let this = vertices
+                    .iter()
+                    .position(|&v| v == vertex_representative)
+                    .unwrap();
+
+                let mut vertices = vertices.iter().cycle().skip(this + 2).copied();
+                let i = [(); 3].map(|_| vertices.next().unwrap());
+
+                let n = geometry.normal_by_index(i[1]);
+
+                let angle = {
+                    let p = i.map(|i| geometry.position_by_index(i));
+                    let l01 = G::Space::project(p[0] - p[1], n);
+                    let l21 = G::Space::project(p[2] - p[1], n);
+                    G::Space::angle_between(l01, l21)
+                };
+
+                let v_os = G::Space::normalize_or_zero(G::Space::project(info.os, n));
+                let v_ot = G::Space::normalize_or_zero(G::Space::project(info.ot, n));
+
+                res.os = res.os + G::Space::scale(v_os, angle);
+                res.ot = res.ot + G::Space::scale(v_ot, angle);
+                res.mag_s += angle * info.mag_s;
+                res.mag_t += angle * info.mag_t;
+
+                (res, angle_sum + angle)
+            },
+        );
+
+    res.os = G::Space::normalize_or_zero(res.os);
+    res.ot = G::Space::normalize_or_zero(res.ot);
+
+    if angle_sum > 0. {
         res.mag_s /= angle_sum;
         res.mag_t /= angle_sum;
     }
+
     res
 }
 
-fn compare_sub_groups(pg1: &SubGroup, pg2: &SubGroup) -> bool {
-    let mut still_same: bool = true;
-    let mut i = 0;
-    if pg1.faces_count != pg2.faces_count {
-        return false;
-    }
-    while i < pg1.faces_count as usize && still_same {
-        still_same = pg1.tri_members[i] == pg2.tri_members[i];
-        if still_same {
-            i += 1;
-        }
-    }
-    still_same
-}
+/// Based on the 4 rules, identify groups based on connectivity.
+fn build_4_rule_groups<'a, V: VectorSpace>(
+    triangles_info: &mut [TriangleInfo<V>],
+    mut face_indices_buffer: &'a mut [usize],
+    vertices: &[usize],
+) -> Vec<Group<'a>> {
+    let mut group_index = 0;
+    let mut groups = Vec::with_capacity(vertices.len());
 
-fn quick_sort(sort_buffer: &mut [i32], left: i32, right: i32, mut seed: u32) {
-    // Random
-    let mut t: u32 = seed & 31i32 as u32;
-    t = seed.rotate_left(t) | seed.rotate_right((32i32 as u32).wrapping_sub(t));
-    seed = seed.wrapping_add(t).wrapping_add(3i32 as u32);
-    // Random end
+    for (index, &vertex_representative) in vertices.iter().enumerate() {
+        let f = index / 3;
+        let i = index % 3;
 
-    let mut l = left;
-    let mut r = right;
-    let n = r - l + 1i32;
-    let index = seed.wrapping_rem(n as u32) as i32;
-    let mid = sort_buffer[(index + l) as usize];
-    loop {
-        while sort_buffer[l as usize] < mid {
-            l += 1;
-        }
-        while sort_buffer[r as usize] > mid {
-            r -= 1;
-        }
-        if l <= r {
-            sort_buffer.swap(l as usize, r as usize);
-            l += 1;
-            r -= 1;
-        }
-        if l > r {
-            break;
-        }
-    }
-    if left < r {
-        quick_sort(sort_buffer, left, r, seed);
-    }
-    if l < right {
-        quick_sort(sort_buffer, l, right, seed);
-    }
-}
+        let info = &mut triangles_info[f];
 
-fn build_4_rule_groups(
-    triangles_info: &mut [TriangleInfo],
-    groups: &mut [Group],
-    face_indices_buffer: &mut [i32],
-    vertex_indices: &[i32],
-    triangles_count: i32,
-) -> i32 {
-    let max_groups: i32 = triangles_count * 3i32;
-    let mut active_groups: i32 = 0i32;
-    let mut offset: i32 = 0i32;
-    for f in 0..triangles_count {
-        for i in 0..3i32 {
-            // if not assigned to a group
-            if !triangles_info[f as usize]
+        if info.flags.contains(TriangleFlags::GROUP_WITH_ANY) || info.assigned_group[i].is_some() {
+            continue;
+        }
+
+        info.assigned_group[i] = Some(group_index);
+        let orient_preserving = info.flags.contains(TriangleFlags::ORIENT_PRESERVING);
+
+        face_indices_buffer[0] = f;
+        let mut face_indices_len = 1;
+
+        let or_pre = info.flags.contains(TriangleFlags::ORIENT_PRESERVING);
+
+        for neighbor in [i, i + 2]
+            .map(|i| info.face_neighbors[i % 3])
+            .into_iter()
+            .flatten()
+        {
+            let answer = assign_recur(
+                vertices,
+                triangles_info,
+                neighbor,
+                group_index,
+                face_indices_buffer,
+                vertex_representative,
+                orient_preserving,
+                &mut face_indices_len,
+            );
+            let or_pre2 = triangles_info[neighbor]
                 .flags
-                .contains(TriangleFlags::GROUP_WITH_ANY)
-                && triangles_info[f as usize].assigned_group[i as usize] == usize::MAX
-            {
-                let vert_index: i32 = vertex_indices[(f * 3i32 + i) as usize];
-                assert!(active_groups < max_groups);
-
-                let group_index = active_groups as usize;
-                triangles_info[f as usize].assigned_group[i as usize] = group_index;
-                let group = &mut groups[group_index];
-                group.vertex_representative = vert_index;
-                group.orient_preservering = triangles_info[f as usize]
-                    .flags
-                    .contains(TriangleFlags::ORIENT_PRESERVING);
-                group.face_indices_len = 0;
-                group.face_indices_index = offset as usize;
-                active_groups += 1;
-
-                add_tri_to_group(face_indices_buffer, group, f);
-                let or_pre = triangles_info[f as usize]
-                    .flags
-                    .contains(TriangleFlags::ORIENT_PRESERVING);
-                let neigh_index_l = triangles_info[f as usize].face_neighbors[i as usize];
-                let neigh_index_r = triangles_info[f as usize].face_neighbors
-                    [(if i > 0i32 { i - 1i32 } else { 2i32 }) as usize];
-                if neigh_index_l >= 0i32 {
-                    let answer: bool = assign_recur(
-                        vertex_indices,
-                        triangles_info,
-                        neigh_index_l,
-                        group,
-                        group_index,
-                        face_indices_buffer,
-                    );
-                    let or_pre2: bool = triangles_info[neigh_index_l as usize]
-                        .flags
-                        .contains(TriangleFlags::ORIENT_PRESERVING);
-                    let diff: bool = or_pre != or_pre2;
-                    assert!(answer || diff);
-                }
-                if neigh_index_r >= 0i32 {
-                    let answer: bool = assign_recur(
-                        vertex_indices,
-                        triangles_info,
-                        neigh_index_r,
-                        group,
-                        group_index,
-                        face_indices_buffer,
-                    );
-                    let or_pre_2: bool = triangles_info[neigh_index_r as usize]
-                        .flags
-                        .contains(TriangleFlags::ORIENT_PRESERVING);
-                    let diff: bool = or_pre != or_pre_2;
-                    assert!(answer || diff);
-                }
-
-                // update offset
-                offset += group.face_indices_len as i32;
-
-                // since the groups are disjoint a triangle can never
-                // belong to more than 3 groups. Subsequently something
-                // is completely screwed if this assertion ever hits.
-                assert!(offset <= max_groups);
-            }
+                .contains(TriangleFlags::ORIENT_PRESERVING);
+            let diff = or_pre != or_pre2;
+            assert!(answer || diff);
         }
+
+        group_index += 1;
+
+        let face_indices;
+        (face_indices, face_indices_buffer) = face_indices_buffer.split_at_mut(face_indices_len);
+
+        groups.push(Group {
+            face_indices,
+            vertex_representative,
+            orient_preserving,
+        });
     }
 
-    active_groups
+    groups
 }
 
-fn assign_recur(
-    vertex_indices: &[i32],
-    triangles_info: &mut [TriangleInfo],
-    my_tri_index: i32,
-    group: &mut Group,
+#[expect(clippy::too_many_arguments)]
+fn assign_recur<V: VectorSpace>(
+    vertex_indices: &[usize],
+    triangles_info: &mut [TriangleInfo<V>],
+    my_tri_index: usize,
     group_index: usize,
-    face_indices_buffer: &mut [i32],
+    face_indices_buffer: &mut [usize],
+    vertex_representative: usize,
+    orient_preserving: bool,
+    face_indices_len: &mut usize,
 ) -> bool {
-    let my_tri_info = &mut triangles_info[my_tri_index as usize];
+    let my_tri_info = &mut triangles_info[my_tri_index];
 
     // track down vertex
-    let vert_rep: i32 = group.vertex_representative;
-    let offset = 3 * my_tri_index as usize;
-    let mut i: i32 = -1;
-    if vertex_indices[offset] == vert_rep {
-        i = 0;
-    } else if vertex_indices[offset + 1] == vert_rep {
-        i = 1;
-    } else if vertex_indices[offset + 2] == vert_rep {
-        i = 2;
-    }
-    assert!((0..3).contains(&i));
+    let i = vertex_indices
+        .iter()
+        .copied()
+        .skip(3 * my_tri_index)
+        .take(3)
+        .position(|v| v == vertex_representative)
+        .unwrap();
 
     // early out
-    if my_tri_info.assigned_group[i as usize] == group_index {
-        return true;
+    if let Some(existing_group) = my_tri_info.assigned_group[i] {
+        return group_index == existing_group;
     }
-    if !my_tri_info.assigned_group[i as usize] == usize::MAX {
+
+    // first to group with a group-with-anything triangle
+    // determines it's orientation.
+    // This is the only existing order dependency in the code!!
+    if my_tri_info.flags.contains(TriangleFlags::GROUP_WITH_ANY)
+        && my_tri_info.assigned_group.iter().all(|g| g.is_none())
+    {
+        my_tri_info
+            .flags
+            .set(TriangleFlags::ORIENT_PRESERVING, orient_preserving);
+    }
+
+    if my_tri_info.flags.contains(TriangleFlags::ORIENT_PRESERVING) != orient_preserving {
         return false;
     }
 
-    if my_tri_info.flags.contains(TriangleFlags::GROUP_WITH_ANY) {
-        // first to group with a group-with-anything triangle
-        // determines it's orientation.
-        // This is the only existing order dependency in the code!!
-        if my_tri_info.assigned_group[0] == usize::MAX
-            && my_tri_info.assigned_group[1] == usize::MAX
-            && my_tri_info.assigned_group[2] == usize::MAX
-        {
-            my_tri_info
-                .flags
-                .set(TriangleFlags::ORIENT_PRESERVING, group.orient_preservering);
-        }
-    }
+    face_indices_buffer[*face_indices_len] = my_tri_index;
+    *face_indices_len += 1;
 
-    let orient: bool = my_tri_info.flags.contains(TriangleFlags::ORIENT_PRESERVING);
-    if orient != group.orient_preservering {
-        return false;
-    }
+    my_tri_info.assigned_group[i] = Some(group_index);
 
-    add_tri_to_group(face_indices_buffer, group, my_tri_index);
-    my_tri_info.assigned_group[i as usize] = group_index;
-
-    let neigh_index_l = my_tri_info.face_neighbors[i as usize];
-    let neigh_index_r = my_tri_info.face_neighbors[(if i > 0 { i - 1 } else { 2 }) as usize];
-    if neigh_index_l >= 0 {
+    for neighbor in [i, i + 2]
+        .map(|i| my_tri_info.face_neighbors[i % 3])
+        .into_iter()
+        .flatten()
+    {
         assign_recur(
             vertex_indices,
             triangles_info,
-            neigh_index_l,
-            group,
+            neighbor,
             group_index,
             face_indices_buffer,
-        );
-    }
-    if neigh_index_r >= 0 {
-        assign_recur(
-            vertex_indices,
-            triangles_info,
-            neigh_index_r,
-            group,
-            group_index,
-            face_indices_buffer,
+            vertex_representative,
+            orient_preserving,
+            face_indices_len,
         );
     }
 
     true
 }
 
-fn add_tri_to_group(face_indices_buffer: &mut [i32], group: &mut Group, tri_index: i32) {
-    let offset = group.face_indices_index + group.face_indices_len;
-    face_indices_buffer[offset] = tri_index;
-    group.face_indices_len += 1;
-}
-
+/// Evaluate triangle level attributes and neighbor list.
 fn init_tri_info<G: Geometry>(
-    geometry: &mut G,
-    triangles_info: &mut [TriangleInfo],
-    vertex_indices: &[i32],
-    triangles_count: usize,
+    geometry: &G,
+    triangles: &mut [TriangleInfo<G::Space>],
+    vertices: &[usize],
 ) {
-    let mut t = 0;
-
-    // generate neighbor info list
-    #[expect(
-        clippy::needless_range_loop,
-        reason = "matching C implementation exactly"
-    )]
-    for f in 0..triangles_count {
-        for i in 0..3 {
-            triangles_info[f].face_neighbors[i as usize] = -1i32;
-            triangles_info[f].assigned_group[i as usize] = usize::MAX;
-            triangles_info[f].os = [0.0f32; 3];
-            triangles_info[f].ot = [0.0f32; 3];
-            triangles_info[f].mag_s = 0i32 as f32;
-            triangles_info[f].mag_t = 0i32 as f32;
-
-            // assumed bad
-            triangles_info[f].flags |= TriangleFlags::GROUP_WITH_ANY;
-        }
-    }
-
     // evaluate first order derivatives
-    for f in 0..triangles_count {
-        let v1 = get_position(geometry, vertex_indices[f * 3] as usize);
-        let v2 = get_position(geometry, vertex_indices[f * 3 + 1] as usize);
-        let v3 = get_position(geometry, vertex_indices[f * 3 + 2] as usize);
-        let t1 = get_tex_coord(geometry, vertex_indices[f * 3] as usize);
-        let t2 = get_tex_coord(geometry, vertex_indices[f * 3 + 1] as usize);
-        let t3 = get_tex_coord(geometry, vertex_indices[f * 3 + 2] as usize);
-        let t21x: f32 = t2[0] - t1[0];
-        let t21y: f32 = t2[1] - t1[1];
-        let t31x: f32 = t3[0] - t1[0];
-        let t31y: f32 = t3[1] - t1[1];
-        let d1 = subtract(v2, v1);
-        let d2 = subtract(v3, v1);
-        let signed_arena_stx2: f32 = t21x * t31y - t21y * t31x;
-        let os = subtract(multiply(d1, t31y), multiply(d2, t21y));
-        let ot = add(multiply(d1, -t31x), multiply(d2, t21x));
-
-        triangles_info[f]
-            .flags
-            .set(TriangleFlags::ORIENT_PRESERVING, signed_arena_stx2 > 0f32);
-
-        if not_zero(signed_arena_stx2) {
-            let abs_arena: f32 = abs(signed_arena_stx2);
-            let len_os: f32 = length(os);
-            let len_ot: f32 = length(ot);
-            let s: f32 = if !triangles_info[f]
-                .flags
-                .contains(TriangleFlags::ORIENT_PRESERVING)
-            {
-                -1.0f32
-            } else {
-                1.0f32
+    triangles
+        .iter_mut()
+        .map(|info| {
+            *info = TriangleInfo {
+                original_face_index: info.original_face_index,
+                vertex_offset: info.vertex_offset,
+                vertex_indices: info.vertex_indices,
+                flags: info.flags | TriangleFlags::GROUP_WITH_ANY,
+                ..TriangleInfo::zero()
             };
-            if not_zero(len_os) {
-                triangles_info[f].os = multiply(os, s / len_os);
-            }
-            if not_zero(len_ot) {
-                triangles_info[f].ot = multiply(ot, s / len_ot);
+
+            info
+        })
+        .zip(vertices.chunks_exact(3))
+        .filter_map(|(info, i)| {
+            let i = [i[0], i[1], i[2]];
+            let v = i.map(|i| geometry.position_by_index(i));
+            let t = i.map(|i| geometry.tex_coord_by_index(i).into());
+            let a = t[1][0] - t[0][0];
+            let b = t[1][1] - t[0][1];
+            let c = t[2][0] - t[0][0];
+            let d = t[2][1] - t[0][1];
+            let d1 = v[1] - v[0];
+            let d2 = v[2] - v[0];
+
+            let signed_area = a * d - b * c;
+            let os = G::Space::scale(d1, d) - G::Space::scale(d2, b);
+            let ot = G::Space::scale(d1, -c) + G::Space::scale(d2, a);
+
+            info.flags.set(
+                TriangleFlags::ORIENT_PRESERVING,
+                signed_area.is_sign_positive(),
+            );
+
+            not_zero(signed_area).then_some((info, signed_area, os, ot))
+        })
+        .map(|(info, signed_area_stx2, os, ot)| {
+            info.os = G::Space::normalize_or_zero(os);
+            info.ot = G::Space::normalize_or_zero(ot);
+
+            if !info.flags.contains(TriangleFlags::ORIENT_PRESERVING) {
+                info.os = -info.os;
+                info.ot = -info.ot;
             }
 
             // evaluate magnitudes prior to normalization of vOs and vOt
-            triangles_info[f].mag_s = len_os / abs_arena;
-            triangles_info[f].mag_t = len_ot / abs_arena;
+            let abs_area = abs(signed_area_stx2);
+            info.mag_s = G::Space::length(os) / abs_area;
+            info.mag_t = G::Space::length(ot) / abs_area;
 
-            // if this is a good triangle
-            if not_zero(triangles_info[f].mag_s) && not_zero(triangles_info[f].mag_t) {
-                triangles_info[f]
-                    .flags
-                    .remove(TriangleFlags::GROUP_WITH_ANY);
+            info
+        })
+        .filter(|info| not_zero(info.mag_s) && not_zero(info.mag_t))
+        .for_each(|info| info.flags.remove(TriangleFlags::GROUP_WITH_ANY));
+
+    triangles
+        .chunk_by_mut(|a, b| a.original_face_index == b.original_face_index)
+        .filter_map(|chunk| match chunk {
+            [a, b] => Some([a, b]),
+            _ => None,
+        })
+        .filter(|face| {
+            face.iter()
+                .all(|v| !v.flags.contains(TriangleFlags::MARK_DEGENERATE))
+        })
+        .filter(|face| {
+            face.iter()
+                .filter(|v| v.flags.contains(TriangleFlags::ORIENT_PRESERVING))
+                .count()
+                == 1
+        })
+        .for_each(|[mut a, mut b]| {
+            // if this happens the quad has extremely bad mapping!!
+            if b.flags.contains(TriangleFlags::GROUP_WITH_ANY)
+                || calc_tex_area(geometry, &vertices[a.vertex_offset..(a.vertex_offset + 3)])
+                    >= calc_tex_area(geometry, &vertices[b.vertex_offset..(b.vertex_offset + 3)])
+            {
+                (a, b) = (b, a);
             }
-        }
-    }
 
-    // force otherwise healthy quads to a fixed orientation
-    while t < triangles_count - 1 {
-        let fo_a: i32 = triangles_info[t].original_face_index;
-        let fo_b: i32 = triangles_info[t + 1].original_face_index;
-        if fo_a == fo_b {
-            let is_deg_a: bool = triangles_info[t]
-                .flags
-                .contains(TriangleFlags::MARK_DEGENERATE);
-            let is_deg_b: bool = triangles_info[t + 1]
-                .flags
-                .contains(TriangleFlags::MARK_DEGENERATE);
+            b.flags.set(
+                TriangleFlags::ORIENT_PRESERVING,
+                a.flags.contains(TriangleFlags::ORIENT_PRESERVING),
+            );
+        });
 
-            // bad triangles should already have been removed by
-            // DegenPrologue(), but just in case check bIsDeg_a and bIsDeg_a are false
-            if !(is_deg_a || is_deg_b) {
-                let orient_a: bool = triangles_info[t]
-                    .flags
-                    .contains(TriangleFlags::ORIENT_PRESERVING);
-                let orient_b: bool = triangles_info[t + 1]
-                    .flags
-                    .contains(TriangleFlags::ORIENT_PRESERVING);
-
-                // if this happens the quad has extremely bad mapping!!
-                if orient_a != orient_b {
-                    let mut choose_orient_first_tri: bool = false;
-                    if triangles_info[t + 1]
-                        .flags
-                        .contains(TriangleFlags::GROUP_WITH_ANY)
-                        || calc_tex_area(geometry, vertex_indices, t * 3)
-                            >= calc_tex_area(geometry, vertex_indices, (t + 1) * 3)
-                    {
-                        choose_orient_first_tri = true;
-                    }
-
-                    // force match
-                    let t0 = if choose_orient_first_tri { t } else { t + 1 };
-                    let t1_0 = if choose_orient_first_tri { t + 1 } else { t };
-
-                    triangles_info[t1_0].flags.set(
-                        TriangleFlags::ORIENT_PRESERVING,
-                        triangles_info[t0]
-                            .flags
-                            .contains(TriangleFlags::ORIENT_PRESERVING),
-                    );
-                }
-            }
-            t += 2;
-        } else {
-            t += 1;
-        }
-    }
-
-    let mut edges = vec![Edge::zero(); triangles_count * 3];
-    build_neighbors_fast(
-        triangles_info,
-        &mut edges,
-        vertex_indices,
-        triangles_count as i32,
-    );
+    build_neighbors_fast(triangles, vertices);
 }
 
-fn build_neighbors_fast(
-    triangles_info: &mut [TriangleInfo],
-    edges: &mut [Edge],
-    vertex_indices: &[i32],
-    triangles_count: i32,
-) {
+fn build_neighbors_fast<V: VectorSpace>(triangles: &mut [TriangleInfo<V>], vertices: &[usize]) {
     // build array of edges
-    // could replace with a random seed?
-    let seed: u32 = 39871946i32 as u32;
-    for f in 0..triangles_count {
-        for i in 0..3 {
-            let i0: i32 = vertex_indices[(f * 3i32 + i) as usize];
-            let i1: i32 =
-                vertex_indices[(f * 3i32 + if i < 2i32 { i + 1i32 } else { 0i32 }) as usize];
-            edges[(f * 3i32 + i) as usize].i0 = if i0 < i1 { i0 } else { i1 };
-            edges[(f * 3i32 + i) as usize].i1 = if i0 >= i1 { i0 } else { i1 };
-            edges[(f * 3i32 + i) as usize].f = f;
-        }
-    }
+    let mut edges = vertices
+        .iter()
+        .enumerate()
+        .map(|(a, &i0)| {
+            let face = a / 3;
+            let b = 3 * face + (a + 1).rem_euclid(3);
+            let i1 = vertices[b];
 
-    // sort over all edges by i0, this is the pricy one.
-    quick_sort_edges(edges, 0i32, triangles_count * 3i32 - 1i32, 0i32, seed);
+            Edge {
+                i0: i0.min(i1),
+                i1: i0.max(i1),
+                face,
+            }
+        })
+        .collect::<Vec<_>>();
 
-    // sub sort over i1, should be fast.
-    // could replace this with a 64 bit int sort over (i0,i1)
-    // with i0 as msb in the quicksort call above.
-    let entries = triangles_count * 3;
-    let mut cur_start_index = 0;
-    for i in 1..entries {
-        if edges[cur_start_index as usize].i0 != edges[i as usize].i0 {
-            let l: i32 = cur_start_index;
-            let r: i32 = i - 1i32;
-            cur_start_index = i;
-            quick_sort_edges(edges, l, r, 1i32, seed);
-        }
-    }
+    edges.sort();
 
-    // sub sort over f, which should be fast.
-    // this step is to remain compliant with BuildNeighborsSlow() when
-    // more than 2 triangles use the same edge (such as a butterfly topology).
-    cur_start_index = 0i32;
-    for i in 1..entries {
-        if edges[cur_start_index as usize].i0 != edges[i as usize].i0
-            || edges[cur_start_index as usize].i1 != edges[i as usize].i1
-        {
-            let l_0: i32 = cur_start_index;
-            let r_0: i32 = i - 1;
-            cur_start_index = i;
-            quick_sort_edges(edges, l_0, r_0, 2, seed);
-        }
-    }
+    let mut iter = edges.iter().map(|&edge| {
+        let vertices = vertices.iter().copied().skip(edge.face * 3).take(3).cycle();
+
+        let (edgenum, (i0, i1)) = vertices
+            .clone()
+            .zip(vertices.skip(1))
+            .enumerate()
+            .find(|&(_, (a, b))| (a == edge.i0 || a == edge.i1) && (b == edge.i0 || b == edge.i1))
+            .unwrap();
+
+        (edge, edgenum, i0, i1)
+    });
 
     // pair up, adjacent triangles
-    for i in 0..entries {
-        let i0_0: i32 = edges[i as usize].i0;
-        let i1_0: i32 = edges[i as usize].i1;
-        let f_0: i32 = edges[i as usize].f;
-        let mut i0_a: i32 = 0;
-        let mut i1_a: i32 = 0;
-        let mut edgenum_a: i32 = 0;
-        let mut edgenum_b: i32 = 0;
-        get_edge(
-            &mut i0_a,
-            &mut i1_a,
-            &mut edgenum_a,
-            vertex_indices,
-            (f_0 * 3i32) as usize,
-            i0_0,
-            i1_0,
-        );
-        let unassigned_a = triangles_info[f_0 as usize].face_neighbors[edgenum_a as usize] == -1;
-        if unassigned_a {
-            // get true index ordering
-            let mut j: i32 = i + 1i32;
-            let mut not_found: bool = true;
-            while j < entries
-                && i0_0 == edges[j as usize].i0
-                && i1_0 == edges[j as usize].i1
-                && not_found
-            {
-                let mut i0_b: i32 = 0;
-                let mut i1_b: i32 = 0;
-                let t = edges[j as usize].f;
-                get_edge(
-                    &mut i1_b,
-                    &mut i0_b,
-                    &mut edgenum_b,
-                    vertex_indices,
-                    (t * 3i32) as usize,
-                    edges[j as usize].i0,
-                    edges[j as usize].i1,
-                );
-                let unassigned_b =
-                    triangles_info[t as usize].face_neighbors[edgenum_b as usize] == -1;
-                if i0_a == i0_b && i1_a == i1_b && unassigned_b {
-                    not_found = false;
-                } else {
-                    j += 1;
-                }
-            }
-            if !not_found {
-                let t_0: i32 = edges[j as usize].f;
-                triangles_info[f_0 as usize].face_neighbors[edgenum_a as usize] = t_0;
-                triangles_info[t_0 as usize].face_neighbors[edgenum_b as usize] = f_0;
-            }
+    while let Some((a, edgenum_a, i0_a, i1_a)) = iter.next() {
+        if triangles[a.face].face_neighbors[edgenum_a].is_some() {
+            continue;
+        }
+
+        // get true index ordering
+        let search = iter
+            .clone()
+            .take_while(|(b, _, _, _)| a.i0 == b.i0 && a.i1 == b.i1)
+            .find_map(|(b, edgenum_b, i1_b, i0_b)| {
+                let coincident = i0_a == i0_b && i1_a == i1_b;
+                let unassigned = triangles[b.face].face_neighbors[edgenum_b].is_none();
+                (coincident && unassigned).then_some((edgenum_b, b))
+            });
+
+        if let Some((edgenum_b, b)) = search {
+            triangles[a.face].face_neighbors[edgenum_a] = Some(b.face);
+            triangles[b.face].face_neighbors[edgenum_b] = Some(a.face);
         }
     }
 }
 
-fn get_edge(
-    i0_out: &mut i32,
-    i1_out: &mut i32,
-    edgenum_out: &mut i32,
-    indices: &[i32],
-    offset: usize,
-    i0_in: i32,
-    i1_in: i32,
-) {
-    let indices = &indices[offset..offset + 3];
-
-    *edgenum_out = -1i32;
-    if indices[0] == i0_in || indices[0] == i1_in {
-        if indices[1] == i0_in || indices[1] == i1_in {
-            *edgenum_out = 0i32;
-            *i0_out = indices[0];
-            *i1_out = indices[1];
-        } else {
-            *edgenum_out = 2i32;
-            *i0_out = indices[2];
-            *i1_out = indices[0];
-        }
-    } else {
-        *edgenum_out = 1i32;
-        *i0_out = indices[1];
-        *i1_out = indices[2];
-    };
+/// returns the texture area times 2
+fn calc_tex_area<G: Geometry>(geometry: &G, i: &[usize]) -> f32 {
+    let t = [i[0], i[1], i[2]].map(|i| geometry.tex_coord_by_index(i).into());
+    let a = t[1][0] - t[0][0];
+    let b = t[1][1] - t[0][1];
+    let c = t[2][0] - t[0][0];
+    let d = t[2][1] - t[0][1];
+    let signed_area_stx2 = a * d - b * c;
+    abs(signed_area_stx2)
 }
 
-fn quick_sort_edges(sort_buffer: &mut [Edge], left: i32, right: i32, channel: i32, mut seed: u32) {
-    // early out
-    let elems: i32 = right - left + 1i32;
-    if elems < 2 {
-        return;
-    }
-    if elems == 2 {
-        if sort_buffer[left as usize].channel(channel)
-            > sort_buffer[right as usize].channel(channel)
-        {
-            sort_buffer.swap(left as usize, right as usize);
-        }
-        return;
-    }
-
-    // Random
-    let mut t = seed & 31i32 as u32;
-    t = seed.rotate_left(t) | seed.rotate_right((32i32 as u32).wrapping_sub(t));
-    seed = seed.wrapping_add(t).wrapping_add(3i32 as u32);
-    // Random end
-
-    let mut l = left;
-    let mut r = right;
-    let n = r - l + 1i32;
-    let index = seed.wrapping_rem(n as u32) as i32;
-    let mid = sort_buffer[(index + l) as usize].channel(channel);
-    loop {
-        while sort_buffer[l as usize].channel(channel) < mid {
-            l += 1;
-        }
-        while sort_buffer[r as usize].channel(channel) > mid {
-            r -= 1;
-        }
-        if l <= r {
-            sort_buffer.swap(l as usize, r as usize);
-            l += 1;
-            r -= 1;
-        }
-        if l > r {
-            break;
-        }
-    }
-    if left < r {
-        quick_sort_edges(sort_buffer, left, r, channel, seed);
-    }
-    if l < right {
-        quick_sort_edges(sort_buffer, l, right, channel, seed);
-    };
+/// Stores triangle and vertex information split into good and degenerate slices.
+struct Info<'a, V: VectorSpace> {
+    good_triangles: &'a mut [TriangleInfo<V>],
+    degenerate_triangles: &'a mut [TriangleInfo<V>],
+    good_vertices: &'a mut [usize],
+    degenerate_vertices: &'a mut [usize],
 }
 
-// returns the texture area times 2
-fn calc_tex_area<G: Geometry>(geometry: &mut G, indices: &[i32], start: usize) -> f32 {
-    let t1 = get_tex_coord(geometry, indices[start] as usize);
-    let t2 = get_tex_coord(geometry, indices[start + 1] as usize);
-    let t3 = get_tex_coord(geometry, indices[start + 2] as usize);
-    let t21x: f32 = t2[0] - t1[0];
-    let t21y: f32 = t2[1] - t1[1];
-    let t31x: f32 = t3[0] - t1[0];
-    let t31y: f32 = t3[1] - t1[1];
-    let signed_area_stx2: f32 = t21x * t31y - t21y * t31x;
-    if signed_area_stx2 < 0i32 as f32 {
-        -signed_area_stx2
-    } else {
-        signed_area_stx2
-    }
-}
+/// Sort the provided triangle info and vertex index lists into good and degenerate
+/// halves.
+/// The returned [`Info`] stores each part as slices of the provided lists.
+///
+/// Mark all triangle pairs that belong to a quad with only one good triangle.
+/// These need special treatment in DegenEpilogue().
+/// Additionally, move all good triangles to the start of pTriInfos[] and
+/// piTriListIn[] without changing order and put the degenerate triangles last.
+fn split_degenerate<'a, G: Geometry>(
+    geometry: &G,
+    triangles: &'a mut [TriangleInfo<G::Space>],
+    vertices: &'a mut [usize],
+) -> Info<'a, G::Space> {
+    // Mark & count all degenerate triangles
+    let degen = triangles
+        .iter_mut()
+        .zip(vertices.chunks_exact(3))
+        .filter(|(_info, i)| {
+            let p = [i[0], i[1], i[2]].map(|i| geometry.position_by_index(i));
+            p[0] == p[1] || p[0] == p[2] || p[1] == p[2]
+        })
+        .map(|(info, _)| info.flags.set(TriangleFlags::MARK_DEGENERATE, true))
+        .count();
 
-// degen triangles
-fn degen_prologue(
-    triangles_info: &mut [TriangleInfo],
-    vertex_indices: &mut [i32],
-    triangles_count: i32,
-    total_triangles_count: i32,
-) {
     // locate quads with only one good triangle
-    let mut t: i32 = 0i32;
-    while t < total_triangles_count - 1i32 {
-        let fo_a: i32 = triangles_info[t as usize].original_face_index;
-        let fo_b: i32 = triangles_info[(t + 1i32) as usize].original_face_index;
-        if fo_a == fo_b {
-            let is_deg_a: bool = triangles_info[t as usize]
-                .flags
-                .contains(TriangleFlags::MARK_DEGENERATE);
-            let is_deg_b: bool = triangles_info[(t + 1) as usize]
-                .flags
-                .contains(TriangleFlags::MARK_DEGENERATE);
-            if is_deg_a ^ is_deg_b {
-                triangles_info[t as usize].flags |= TriangleFlags::QUAD_ONE_DEGEN_TRI;
-                triangles_info[(t + 1i32) as usize].flags |= TriangleFlags::QUAD_ONE_DEGEN_TRI;
-            }
-            t += 2i32;
-        } else {
-            t += 1;
-        }
-    }
+    triangles
+        .chunk_by_mut(|a, b| a.original_face_index == b.original_face_index)
+        .filter_map(|chunk| match chunk {
+            [a, b] => Some([a, b]),
+            _ => None,
+        })
+        .filter(|face| {
+            face.iter()
+                .filter(|v| v.flags.contains(TriangleFlags::MARK_DEGENERATE))
+                .count()
+                == 1
+        })
+        .flatten()
+        .for_each(|v| v.flags |= TriangleFlags::QUAD_ONE_DEGEN_TRI);
 
     // reorder list so all degen triangles are moved to the back
     // without reordering the good triangles
-    let mut next_good_triangle_search_index = 1i32;
-    t = 0i32;
-    let mut still_finding_good_ones = true;
-    while t < triangles_count && still_finding_good_ones {
-        let is_good: bool = !triangles_info[t as usize]
-            .flags
-            .contains(TriangleFlags::MARK_DEGENERATE);
-        if is_good {
-            if next_good_triangle_search_index < t + 2i32 {
-                next_good_triangle_search_index = t + 2i32;
-            }
-        } else {
-            // search for the first good triangle.
-            let mut just_a_degenerate: bool = true;
-            while just_a_degenerate && next_good_triangle_search_index < total_triangles_count {
-                let is_good_0: bool = !triangles_info[next_good_triangle_search_index as usize]
-                    .flags
-                    .contains(TriangleFlags::MARK_DEGENERATE);
-                if is_good_0 {
-                    just_a_degenerate = false;
-                } else {
-                    next_good_triangle_search_index += 1;
-                }
-            }
-            let t0 = t;
-            let t1 = next_good_triangle_search_index;
-            next_good_triangle_search_index += 1;
-
-            // swap triangle t0 and t1
-            if !just_a_degenerate {
-                for i in 0..3 {
-                    vertex_indices.swap((t0 * 3 + i) as usize, (t1 * 3 + i) as usize);
-                }
-                triangles_info.swap(t0 as usize, t1 as usize);
-            } else {
-                still_finding_good_ones = false;
-            }
+    triangles.sort_by(|a, b| {
+        match (
+            a.flags.contains(TriangleFlags::MARK_DEGENERATE),
+            b.flags.contains(TriangleFlags::MARK_DEGENERATE),
+        ) {
+            (true, true) | (false, false) => core::cmp::Ordering::Equal,
+            (true, false) => core::cmp::Ordering::Greater,
+            (false, true) => core::cmp::Ordering::Less,
         }
-        if still_finding_good_ones {
-            t += 1;
-        }
+    });
+
+    let (good_triangles, degenerate_triangles) = triangles.split_at_mut(triangles.len() - degen);
+    let (good_vertices, degenerate_vertices) = vertices.split_at_mut(3 * good_triangles.len());
+
+    Info {
+        good_triangles,
+        degenerate_triangles,
+        good_vertices,
+        degenerate_vertices,
     }
 }
 
-fn generate_shared_vertices_index_list<G: Geometry>(
-    vertex_indices: &mut [i32],
-    geometry: &mut G,
-    triangles_count: usize,
-) {
-    let mut min = get_position(geometry, 0);
-    let mut max = min;
+/// Make a welded index list of identical positions and attributes `(pos, norm, texc)`.
+fn weld_vertices<G: Geometry>(geometry: &G, indices: &mut [usize]) {
+    let mut originals = alloc::collections::BTreeMap::new();
 
-    #[expect(
-        clippy::needless_range_loop,
-        reason = "matching C implementation exactly"
-    )]
-    for i in 1..triangles_count * 3 {
-        let index: i32 = vertex_indices[i];
-        let p = get_position(geometry, index as usize);
-        if min[0] > p[0] {
-            min[0] = p[0];
-        } else if max[0] < p[0] {
-            max[0] = p[0];
-        }
-        if min[1] > p[1] {
-            min[1] = p[1];
-        } else if max[1] < p[1] {
-            max[1] = p[1];
-        }
-        if min[2] > p[2] {
-            min[2] = p[2];
-        } else if max[2] < p[2] {
-            max[2] = p[2];
-        }
-    }
-    let dim = subtract(max, min);
-    let mut channel = 0i32;
-    let mut f_min = min[0];
-    let mut f_max = max[0];
-    if dim[1] > dim[0] && dim[1] > dim[2] {
-        channel = 1i32;
-        f_min = min[1];
-        f_max = max[1];
-    } else if dim[2] > dim[0] {
-        channel = 2i32;
-        f_min = min[2];
-        f_max = max[2];
-    }
+    for index in indices {
+        let p = geometry
+            .position_by_index(*index)
+            .into()
+            .map(|v| v.to_ne_bytes());
+        let n = geometry
+            .normal_by_index(*index)
+            .into()
+            .map(|v| v.to_ne_bytes());
+        let t = geometry
+            .tex_coord_by_index(*index)
+            .into()
+            .map(|v| v.to_ne_bytes());
 
-    let mut hash_table = vec![0i32; triangles_count * 3];
-    let mut hash_offsets = vec![0i32; G_CELLS];
-    let mut hash_count = vec![0i32; G_CELLS];
-    let mut hash_count2 = vec![0i32; G_CELLS];
+        // texture coordinates are only 2D
+        let t = [t[0], t[1]];
 
-    #[expect(
-        clippy::needless_range_loop,
-        reason = "matching C implementation exactly"
-    )]
-    for i in 0..triangles_count * 3 {
-        let index_0: i32 = vertex_indices[i];
-        let p_0 = get_position(geometry, index_0 as usize);
-        let val = p_0[channel as usize];
-        let cell = find_grid_cell(f_min, f_max, val);
-        hash_count[cell] += 1;
-    }
-    hash_offsets[0] = 0i32;
-    let mut k = 1;
-    while k < G_CELLS {
-        hash_offsets[k] = hash_offsets[k - 1] + hash_count[k - 1];
-        k += 1;
-    }
-    #[expect(
-        clippy::needless_range_loop,
-        reason = "matching C implementation exactly"
-    )]
-    for i in 0..triangles_count * 3 {
-        let index_1: i32 = vertex_indices[i];
-        let p_1 = get_position(geometry, index_1 as usize);
-        let val_0 = p_1[channel as usize];
-        let cell_0 = find_grid_cell(f_min, f_max, val_0);
-        hash_table[(hash_offsets[cell_0] + hash_count2[cell_0]) as usize] = i as i32;
-        hash_count2[cell_0] += 1;
-    }
-    k = 0;
-    while k < G_CELLS {
-        k += 1;
-    }
-    let mut max_count = hash_count[0] as usize;
-    k = 1;
-    while k < G_CELLS {
-        if max_count < hash_count[k] as usize {
-            max_count = hash_count[k] as usize;
-        }
-        k += 1;
-    }
-    let mut tmp_vert = vec![TmpVert::zero(); max_count];
-    k = 0;
-    while k < G_CELLS {
-        // extract table of cell k and amount of entries in it
-        let table_0_offset = hash_offsets[k] as usize;
-        let entries = hash_count[k] as usize;
-        if entries >= 2 {
-            let mut e = 0;
-            while e < entries {
-                let i_0: i32 = hash_table[table_0_offset + e];
-                let p_2 = get_position(geometry, vertex_indices[i_0 as usize] as usize);
-                tmp_vert[e].vert = p_2;
-                tmp_vert[e].index = i_0;
-                e += 1;
-            }
-            merge_verts_fast(
-                geometry,
-                vertex_indices,
-                &mut tmp_vert,
-                0i32,
-                (entries - 1) as i32,
-            );
-        }
-        k += 1;
-    }
-}
-
-fn merge_verts_fast<G: Geometry>(
-    geometry: &mut G,
-    vertex_indices: &mut [i32],
-    tmp_vert: &mut [TmpVert],
-    l_in: i32,
-    r_in: i32,
-) {
-    // make bbox
-    let mut min: [f32; 3] = [0.; 3];
-    let mut max: [f32; 3] = [0.; 3];
-    for c in 0..3 {
-        min[c as usize] = tmp_vert[l_in as usize].vert[c as usize];
-        max[c as usize] = min[c as usize];
-    }
-    let mut l = l_in + 1i32;
-    while l <= r_in {
-        for c in 0..3 {
-            if min[c as usize] > tmp_vert[l as usize].vert[c as usize] {
-                min[c as usize] = tmp_vert[l as usize].vert[c as usize];
-            } else if max[c as usize] < tmp_vert[l as usize].vert[c as usize] {
-                max[c as usize] = tmp_vert[l as usize].vert[c as usize];
-            }
-        }
-        l += 1;
-    }
-    let dx = max[0usize] - min[0usize];
-    let dy = max[1usize] - min[1usize];
-    let dz = max[2usize] - min[2usize];
-    let mut channel = 0i32;
-    if dy > dx && dy > dz {
-        channel = 1i32;
-    } else if dz > dx {
-        channel = 2i32;
-    }
-    let sep = 0.5f32 * (max[channel as usize] + min[channel as usize]);
-    if sep >= max[channel as usize] || sep <= min[channel as usize] {
-        l = l_in;
-        while l <= r_in {
-            let i: i32 = tmp_vert[l as usize].index;
-            let index: i32 = vertex_indices[i as usize];
-            let p = get_position(geometry, index as usize);
-            let n = get_normal(geometry, index as usize);
-            let t = get_tex_coord(geometry, index as usize);
-            let mut not_found: bool = true;
-            let mut l2: i32 = l_in;
-            let mut i2rec: i32 = -1i32;
-            while l2 < l && not_found {
-                let i2: i32 = tmp_vert[l2 as usize].index;
-                let index2: i32 = vertex_indices[i2 as usize];
-                let p2 = get_position(geometry, index2 as usize);
-                let n2 = get_normal(geometry, index2 as usize);
-                let t2 = get_tex_coord(geometry, index2 as usize);
-                i2rec = i2;
-                if p == p2 && n == n2 && t == t2 {
-                    not_found = false;
-                } else {
-                    l2 += 1;
-                }
-            }
-            if !not_found {
-                vertex_indices[i as usize] = vertex_indices[i2rec as usize];
-            }
-            l += 1;
-        }
-    } else {
-        let mut l: i32 = l_in;
-        let mut r: i32 = r_in;
-        while l < r {
-            let mut ready_left_swap: bool = false;
-            let mut ready_right_swap: bool = false;
-            while !ready_left_swap && l < r {
-                ready_left_swap = tmp_vert[l as usize].vert[channel as usize] >= sep;
-                if !ready_left_swap {
-                    l += 1;
-                }
-            }
-            while !ready_right_swap && l < r {
-                ready_right_swap = tmp_vert[r as usize].vert[channel as usize] < sep;
-                if !ready_right_swap {
-                    r -= 1;
-                }
-            }
-            if ready_left_swap && ready_right_swap {
-                tmp_vert.swap(l as usize, r as usize);
-                l += 1;
-                r -= 1;
-            }
-        }
-        if l == r {
-            let ready_right_swap_0: bool = tmp_vert[r as usize].vert[channel as usize] < sep;
-            if ready_right_swap_0 {
-                l += 1;
-            } else {
-                r -= 1;
-            }
-        }
-        if l_in < r {
-            merge_verts_fast(geometry, vertex_indices, tmp_vert, l_in, r);
-        }
-        if l < r_in {
-            merge_verts_fast(geometry, vertex_indices, tmp_vert, l, r_in);
-        }
-    };
-}
-
-const G_CELLS: usize = 2048;
-
-// it is IMPORTANT that this function is called to evaluate the hash since
-// inlining could potentially reorder instructions and generate different
-// results for the same effective input value fVal.
-#[inline(never)]
-fn find_grid_cell(min: f32, max: f32, val: f32) -> usize {
-    let f_index = G_CELLS as f32 * ((val - min) / (max - min));
-    let i_index = f_index as isize;
-    if i_index < G_CELLS as isize {
-        if i_index >= 0 { i_index as usize } else { 0 }
-    } else {
-        G_CELLS - 1
-    }
-}
-
-fn add([ax, ay, az]: [f32; 3], [bx, by, bz]: [f32; 3]) -> [f32; 3] {
-    [ax + bx, ay + by, az + bz]
-}
-
-fn subtract(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    add(a, b.map(|x| -x))
-}
-
-fn dot([ax, ay, az]: [f32; 3], [bx, by, bz]: [f32; 3]) -> f32 {
-    ax * bx + ay * by + az * bz
-}
-
-fn length_squared(a: [f32; 3]) -> f32 {
-    dot(a, a)
-}
-
-fn length(a: [f32; 3]) -> f32 {
-    sqrt(length_squared(a))
-}
-
-fn distance_squared(a: [f32; 3], b: [f32; 3]) -> f32 {
-    length_squared(subtract(a, b))
-}
-
-fn multiply(a: [f32; 3], b: f32) -> [f32; 3] {
-    a.map(|x| x * b)
-}
-
-fn project(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    subtract(a, multiply(b, dot(b, a)))
-}
-
-fn normalize(a: [f32; 3]) -> [f32; 3] {
-    multiply(a, 1.0 / length(a))
-}
-
-fn abs(value: f32) -> f32 {
-    if value < 0.0 { -value } else { value }
-}
-
-fn v_not_zero([ax, ay, az]: [f32; 3]) -> bool {
-    not_zero(ax) || not_zero(ay) || not_zero(az)
-}
-
-fn not_zero(fx: f32) -> bool {
-    abs(fx) > 1.1754944e-38f32
-}
-
-fn sqrt(value: f32) -> f32 {
-    #[cfg(feature = "std")]
-    {
-        value.sqrt()
-    }
-    #[cfg(all(not(feature = "std"), feature = "libm"))]
-    {
-        libm::sqrt(value)
-    }
-    #[cfg(all(not(feature = "std"), not(feature = "libm")))]
-    {
-        compile_error!("Require either 'libm' or 'std' for `sqrt`")
-    }
-}
-
-fn acos(value: f64) -> f64 {
-    #[cfg(feature = "std")]
-    {
-        value.acos()
-    }
-    #[cfg(all(not(feature = "std"), feature = "libm"))]
-    {
-        libm::acos(value)
-    }
-    #[cfg(all(not(feature = "std"), not(feature = "libm")))]
-    {
-        compile_error!("Require either 'libm' or 'std' for `acos`")
+        *index = *originals.entry((p, n, t)).or_insert(*index);
     }
 }

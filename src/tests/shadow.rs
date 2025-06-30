@@ -51,11 +51,11 @@ impl<G: Geometry> mikktspace_sys::MikkTSpaceInterface for Shadow<'_, G> {
     }
 
     fn get_position(&self, face: usize, vert: usize) -> [f32; 3] {
-        self.inner.position(face, vert)
+        self.inner.position(face, vert).into()
     }
 
     fn get_normal(&self, face: usize, vert: usize) -> [f32; 3] {
-        self.inner.normal(face, vert)
+        self.inner.normal(face, vert).into()
     }
 
     fn get_tex_coord(&self, face: usize, vert: usize) -> [f32; 2] {
@@ -82,8 +82,8 @@ impl<G: Geometry> mikktspace_sys::MikkTSpaceInterface for Shadow<'_, G> {
         };
         self.reference_results.insert(key, entry);
         self.inner.set_tangent(
-            tangent,
-            bi_tangent,
+            tangent.into(),
+            bi_tangent.into(),
             mag_s,
             mag_t,
             is_orientation_preserving,
@@ -94,6 +94,8 @@ impl<G: Geometry> mikktspace_sys::MikkTSpaceInterface for Shadow<'_, G> {
 }
 
 impl<G: Geometry> Geometry for Shadow<'_, G> {
+    type Space = G::Space;
+
     fn num_faces(&self) -> usize {
         self.inner.num_faces()
     }
@@ -102,11 +104,11 @@ impl<G: Geometry> Geometry for Shadow<'_, G> {
         self.inner.num_vertices_of_face(face)
     }
 
-    fn position(&self, face: usize, vert: usize) -> [f32; 3] {
+    fn position(&self, face: usize, vert: usize) -> <G::Space as crate::VectorSpace>::Vec3 {
         self.inner.position(face, vert)
     }
 
-    fn normal(&self, face: usize, vert: usize) -> [f32; 3] {
+    fn normal(&self, face: usize, vert: usize) -> <G::Space as crate::VectorSpace>::Vec3 {
         self.inner.normal(face, vert)
     }
 
@@ -116,8 +118,8 @@ impl<G: Geometry> Geometry for Shadow<'_, G> {
 
     fn set_tangent(
         &mut self,
-        tangent: [f32; 3],
-        bi_tangent: [f32; 3],
+        tangent: <G::Space as crate::VectorSpace>::Vec3,
+        bi_tangent: <G::Space as crate::VectorSpace>::Vec3,
         f_mag_s: f32,
         f_mag_t: f32,
         bi_tangent_preserves_orientation: bool,
@@ -126,8 +128,8 @@ impl<G: Geometry> Geometry for Shadow<'_, G> {
     ) {
         let key = Key { face, vert };
         let entry = Entry {
-            tangent,
-            bi_tangent,
+            tangent: tangent.into(),
+            bi_tangent: bi_tangent.into(),
             f_mag_s,
             f_mag_t,
             bi_tangent_preserves_orientation,

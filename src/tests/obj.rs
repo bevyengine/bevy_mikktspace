@@ -1,8 +1,28 @@
+use glam::Vec3;
 use wavefront_obj::obj::{ObjSet, Primitive, parse};
+
+struct GlamSpace;
+
+impl crate::VectorSpace for GlamSpace {
+    type Vec3 = Vec3;
+
+    fn length(a: Self::Vec3) -> f32 {
+        a.length()
+    }
+
+    fn angle_between(a: Self::Vec3, b: Self::Vec3) -> f32 {
+        let a = Self::normalize_or_zero(a);
+        let b = Self::normalize_or_zero(b);
+        let cos = Self::dot(a, b).clamp(-1.0, 1.0);
+        (cos as f64).acos() as f32
+    }
+}
 
 struct WavefrontObject(wavefront_obj::obj::Object);
 
 impl crate::Geometry for WavefrontObject {
+    type Space = GlamSpace;
+
     fn num_faces(&self) -> usize {
         self.0.geometry.iter().flat_map(|g| g.shapes.iter()).count()
     }
@@ -22,7 +42,7 @@ impl crate::Geometry for WavefrontObject {
         }
     }
 
-    fn position(&self, face: usize, vert: usize) -> [f32; 3] {
+    fn position(&self, face: usize, vert: usize) -> Vec3 {
         let shape = self
             .0
             .geometry
@@ -41,10 +61,10 @@ impl crate::Geometry for WavefrontObject {
 
         let vertex = self.0.vertices[index];
 
-        [vertex.x as f32, vertex.y as f32, vertex.z as f32]
+        [vertex.x as f32, vertex.y as f32, vertex.z as f32].into()
     }
 
-    fn normal(&self, face: usize, vert: usize) -> [f32; 3] {
+    fn normal(&self, face: usize, vert: usize) -> Vec3 {
         let shape = self
             .0
             .geometry
@@ -68,7 +88,7 @@ impl crate::Geometry for WavefrontObject {
 
         let normal = self.0.normals[index];
 
-        [normal.x as f32, normal.y as f32, normal.z as f32]
+        [normal.x as f32, normal.y as f32, normal.z as f32].into()
     }
 
     fn tex_coord(&self, face: usize, vert: usize) -> [f32; 2] {
