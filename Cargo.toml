@@ -17,18 +17,12 @@ rust-version = "1.85.0"
 
 exclude = ["/data", "/generator"]
 
-[features]
-default = ["std"]
-
-std = []
-libm = ["dep:libm"]
-
 [dependencies]
-libm = { version = "0.2", default-features = false, optional = true }
 bitflags = "2.3"
 
 [dev-dependencies]
 bytemuck = { version = "1.13", features = ["derive"] }
+glam = "0.30.4"
 
 [[example]]
 name = "cube_tangents"

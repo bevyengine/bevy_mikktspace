@@ -7,6 +7,8 @@
 )]
 #![expect(clippy::print_stdout, reason = "Allowed in examples.")]
 
+use glam::Vec3;
+
 type Face = [u32; 3];
 
 #[derive(Debug)]
@@ -21,12 +23,31 @@ struct Mesh {
     vertices: Vec<Vertex>,
 }
 
+struct GlamSpace;
+
+impl bevy_mikktspace::VectorSpace for GlamSpace {
+    type Vec3 = Vec3;
+
+    fn length(a: Self::Vec3) -> f32 {
+        a.length()
+    }
+
+    fn angle_between(a: Self::Vec3, b: Self::Vec3) -> f32 {
+        let a = Self::normalize_or_zero(a);
+        let b = Self::normalize_or_zero(b);
+        let cos = Self::dot(a, b).clamp(-1.0, 1.0);
+        (cos as f64).acos() as f32
+    }
+}
+
 fn vertex(mesh: &Mesh, face: usize, vert: usize) -> &Vertex {
     let vs: &[u32; 3] = &mesh.faces[face];
     &mesh.vertices[vs[vert] as usize]
 }
 
 impl bevy_mikktspace::Geometry for Mesh {
+    type Space = GlamSpace;
+
     fn num_faces(&self) -> usize {
         self.faces.len()
     }
@@ -35,11 +56,11 @@ impl bevy_mikktspace::Geometry for Mesh {
         3
     }
 
-    fn position(&self, face: usize, vert: usize) -> [f32; 3] {
+    fn position(&self, face: usize, vert: usize) -> Vec3 {
         vertex(self, face, vert).position.into()
     }
 
-    fn normal(&self, face: usize, vert: usize) -> [f32; 3] {
+    fn normal(&self, face: usize, vert: usize) -> Vec3 {
         vertex(self, face, vert).normal.into()
     }
 
@@ -259,8 +280,7 @@ fn make_cube() -> Mesh {
 
 fn main() {
     let mut cube = make_cube();
-    let ret = bevy_mikktspace::generate_tangents(&mut cube);
-    assert_eq!(true, ret);
+    bevy_mikktspace::generate_tangents(&mut cube);
 }
 
 fn normalize([ax, ay, az]: [f32; 3]) -> [f32; 3] {
