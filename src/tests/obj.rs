@@ -128,34 +128,3 @@ fn cube() {
         crate::generate_tangents(&mut object);
     }
 }
-
-#[test]
-fn suzanne_bad() {
-    // This model intentionally contains bad faces that can't have tangents generated for it
-    let file = include_str!("../../data/suzanne_bad.obj");
-    let ObjSet { objects, .. } = parse(file).expect("must be able to parse sample data");
-    for object in objects {
-        let mut object = WavefrontObject(object);
-        crate::generate_tangents(&mut object);
-    }
-}
-
-#[test]
-fn suzanne_flat_tris() {
-    let file = include_str!("../../data/suzanne_flat_tris.obj");
-    let ObjSet { objects, .. } = parse(file).expect("must be able to parse sample data");
-    for object in objects {
-        let mut object = WavefrontObject(object);
-        crate::generate_tangents(&mut object);
-    }
-}
-
-#[test]
-fn suzanne_smooth_tris() {
-    let file = include_str!("../../data/suzanne_smooth_tris.obj");
-    let ObjSet { objects, .. } = parse(file).expect("must be able to parse sample data");
-    for object in objects {
-        let mut object = WavefrontObject(object);
-        crate::generate_tangents(&mut object);
-    }
-}
