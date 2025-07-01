@@ -120,8 +120,68 @@ impl crate::Geometry for WavefrontObject {
 }
 
 #[test]
+fn crangeract() {
+    let file = include_str!("../../data/crangeract.obj");
+    let ObjSet { objects, .. } = parse(file).expect("must be able to parse sample data");
+    for object in objects {
+        let mut object = WavefrontObject(object);
+        crate::generate_tangents(&mut object);
+    }
+}
+
+#[test]
 fn cube() {
     let file = include_str!("../../data/cube.obj");
+    let ObjSet { objects, .. } = parse(file).expect("must be able to parse sample data");
+    for object in objects {
+        let mut object = WavefrontObject(object);
+        crate::generate_tangents(&mut object);
+    }
+}
+
+#[test]
+fn doomcone_smooth() {
+    let file = include_str!("../../data/doomcone_smooth.obj");
+    let ObjSet { objects, .. } = parse(file).expect("must be able to parse sample data");
+    for object in objects {
+        let mut object = WavefrontObject(object);
+        crate::generate_tangents(&mut object);
+    }
+}
+
+#[test]
+fn doomcone() {
+    let file = include_str!("../../data/doomcone.obj");
+    let ObjSet { objects, .. } = parse(file).expect("must be able to parse sample data");
+    for object in objects {
+        let mut object = WavefrontObject(object);
+        crate::generate_tangents(&mut object);
+    }
+}
+
+#[test]
+fn obliterated() {
+    let file = include_str!("../../data/obliterated.obj");
+    let ObjSet { objects, .. } = parse(file).expect("must be able to parse sample data");
+    for object in objects {
+        let mut object = WavefrontObject(object);
+        crate::generate_tangents(&mut object);
+    }
+}
+
+#[test]
+fn rancid_geometry() {
+    let file = include_str!("../../data/rancid_geometry.obj");
+    let ObjSet { objects, .. } = parse(file).expect("must be able to parse sample data");
+    for object in objects {
+        let mut object = WavefrontObject(object);
+        crate::generate_tangents(&mut object);
+    }
+}
+
+#[test]
+fn tangeract() {
+    let file = include_str!("../../data/tangeract.obj");
     let ObjSet { objects, .. } = parse(file).expect("must be able to parse sample data");
     for object in objects {
         let mut object = WavefrontObject(object);
