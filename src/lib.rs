@@ -40,6 +40,9 @@ use bitflags::bitflags;
 mod geometry;
 mod math;
 
+#[cfg(test)]
+mod tests;
+
 use geometry::GeometryExt;
 
 pub use geometry::Geometry;
@@ -49,6 +52,11 @@ use crate::math::{abs, not_zero};
 
 /// Generates tangents for the input geometry.
 pub fn generate_tangents<G: Geometry>(geometry: &mut G) {
+    // This allows any invocation of `generate_tangents` to be compared against
+    // the reference C implementation without any additional tooling.
+    #[cfg(test)]
+    let geometry = &mut tests::shadow::Shadow::new(geometry);
+
     generate_tangents_with(geometry, -1.0)
 }
 
