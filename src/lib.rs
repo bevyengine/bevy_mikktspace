@@ -126,6 +126,9 @@
 //!
 //! # Copyright
 //!
+//! This code is a Rust reimplementation of https://github.com/mmikk/MikkTSpace.
+//! The copyright notice below reflects that history, and should not be removed.
+//!
 //! > Copyright (C) 2011 by Morten S. Mikkelsen
 //! >
 //! > This software is provided 'as-is', without any express or implied
@@ -143,6 +146,8 @@
 //! > 2. Altered source versions must be plainly marked as such, and must not be
 //! >    misrepresented as being the original software.
 //! > 3. This notice may not be removed or altered from any source distribution.
+//!
+//! The above notice will also be included in any derivative source files.
 //!
 //! # Advice
 //!
