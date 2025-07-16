@@ -10,13 +10,13 @@ impl FaceVertex {
     /// Panics if `vertex` is larger than 3, or if `face` has it's 2 most significant
     /// bits set.
     pub(crate) const fn new(face: usize, vertex: u8) -> Self {
-        assert!(vertex <= 3);
-        assert!(face <= (usize::MAX >> 2));
+        debug_assert!(vertex <= 3);
+        debug_assert!(face <= (usize::MAX >> 2));
 
         let value = Self(face << 2 | ((vertex & 0x3) as usize));
 
-        assert!(value.face() == face);
-        assert!(value.vertex() == vertex);
+        debug_assert!(value.face() == face);
+        debug_assert!(value.vertex() == vertex);
 
         value
     }

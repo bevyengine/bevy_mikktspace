@@ -80,3 +80,16 @@ jobs:
       - name: Check Docs (all features)
         run: |
           RUSTDOCFLAGS="-D warnings" cargo doc --all-features --document-private-items
+
+  benches:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Check Benchmarks
+        run: |
+          cargo bench --no-run

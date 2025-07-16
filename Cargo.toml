@@ -45,6 +45,7 @@ corrected-vertex-welding = []
 mikktspace-sys = "0.1.1"
 wavefront_obj = "11.0.0"
 libm = "0.2.15"
+criterion = "0.6.0"
 
 [lints.rust.unexpected_cfgs]
 level = "warn"
@@ -52,6 +53,10 @@ check-cfg = ['cfg(mikktspace_rs_more_assertions)']
 
 [[example]]
 name = "cube_tangents"
+
+[[bench]]
+name = "plane"
+harness = false
 
 [package.metadata.docs.rs]
 rustdoc-args = ["-Zunstable-options", "--generate-link-to-definition"]
