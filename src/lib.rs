@@ -1,3 +1,9 @@
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![doc(
+    html_logo_url = "https://bevy.org/assets/icon.png",
+    html_favicon_url = "https://bevy.org/assets/icon.png"
+)]
+
 //! Provides a byte-identical implementation of [`mikktspace`] in entirely safe
 //! and idiomatic Rust.
 //! This is used to generate [`TangentSpace`] values for 3D geometry.
