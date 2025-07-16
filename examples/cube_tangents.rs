@@ -7,8 +7,6 @@
 )]
 #![expect(clippy::print_stdout, reason = "Allowed in examples.")]
 
-use glam::Vec3;
-
 type Face = [u32; 3];
 
 #[derive(Debug)]
@@ -23,31 +21,12 @@ struct Mesh {
     vertices: Vec<Vertex>,
 }
 
-struct GlamSpace;
-
-impl bevy_mikktspace::VectorSpace for GlamSpace {
-    type Vec3 = Vec3;
-
-    fn length(a: Self::Vec3) -> f32 {
-        a.length()
-    }
-
-    fn angle_between(a: Self::Vec3, b: Self::Vec3) -> f32 {
-        let a = Self::normalize_or_zero(a);
-        let b = Self::normalize_or_zero(b);
-        let cos = Self::dot(a, b).clamp(-1.0, 1.0);
-        (cos as f64).acos() as f32
-    }
-}
-
 fn vertex(mesh: &Mesh, face: usize, vert: usize) -> &Vertex {
     let vs: &[u32; 3] = &mesh.faces[face];
     &mesh.vertices[vs[vert] as usize]
 }
 
 impl bevy_mikktspace::Geometry for Mesh {
-    type Space = GlamSpace;
-
     fn num_faces(&self) -> usize {
         self.faces.len()
     }
@@ -56,19 +35,24 @@ impl bevy_mikktspace::Geometry for Mesh {
         3
     }
 
-    fn position(&self, face: usize, vert: usize) -> Vec3 {
-        vertex(self, face, vert).position.into()
+    fn position(&self, face: usize, vert: usize) -> [f32; 3] {
+        vertex(self, face, vert).position
     }
 
-    fn normal(&self, face: usize, vert: usize) -> Vec3 {
-        vertex(self, face, vert).normal.into()
+    fn normal(&self, face: usize, vert: usize) -> [f32; 3] {
+        vertex(self, face, vert).normal
     }
 
     fn tex_coord(&self, face: usize, vert: usize) -> [f32; 2] {
-        vertex(self, face, vert).tex_coord.into()
+        vertex(self, face, vert).tex_coord
     }
 
-    fn set_tangent_encoded(&mut self, tangent: [f32; 4], face: usize, vert: usize) {
+    fn set_tangent(
+        &mut self,
+        tangent: Option<bevy_mikktspace::TangentSpace>,
+        face: usize,
+        vert: usize,
+    ) {
         println!(
             "{face}-{vert}: v: {v:?}, vn: {vn:?}, vt: {vt:?}, vx: {vx:?}",
             face = face,
@@ -76,7 +60,7 @@ impl bevy_mikktspace::Geometry for Mesh {
             v = vertex(self, face, vert).position,
             vn = vertex(self, face, vert).normal,
             vt = vertex(self, face, vert).tex_coord,
-            vx = tangent,
+            vx = tangent.map(|tangent| tangent.tangent_encoded()),
         );
     }
 }
@@ -280,7 +264,7 @@ fn make_cube() -> Mesh {
 
 fn main() {
     let mut cube = make_cube();
-    bevy_mikktspace::generate_tangents(&mut cube);
+    let _ = bevy_mikktspace::generate_tangents(&mut cube);
 }
 
 fn normalize([ax, ay, az]: [f32; 3]) -> [f32; 3] {
