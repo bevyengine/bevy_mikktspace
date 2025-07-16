@@ -9,7 +9,7 @@
 use alloc::collections::BTreeMap;
 
 use crate::{
-    MikkTSpaceInterface, Ops,
+    Geometry, Ops,
     mikktspace::{
         FaceVertex, get_normal_from_index, get_position_from_index,
         get_texture_coordinate_from_index,
@@ -17,8 +17,8 @@ use crate::{
 };
 
 /// De-duplicate [`FaceVertex`]'s by comparing the position, normal, and texture
-/// coordinate values from the provided [context](MikkTSpaceInterface).
-pub(super) fn weld_vertices<I: MikkTSpaceInterface<O>, O: Ops>(
+/// coordinate values from the provided [context](Geometry).
+pub(super) fn weld_vertices<I: Geometry<O>, O: Ops>(
     context: &I,
     triangle_vertices: &mut [FaceVertex],
 ) {
@@ -35,7 +35,7 @@ pub(super) fn weld_vertices<I: MikkTSpaceInterface<O>, O: Ops>(
 struct Key([f32; 3 + 3 + 2]);
 
 impl Key {
-    fn new<I: MikkTSpaceInterface<O>, O: Ops>(context: &I, index: FaceVertex) -> Self {
+    fn new<I: Geometry<O>, O: Ops>(context: &I, index: FaceVertex) -> Self {
         let p: [f32; 3] = get_position_from_index(context, index).into();
         let n: [f32; 3] = get_normal_from_index(context, index).into();
         let t: [f32; 2] = get_texture_coordinate_from_index(context, index);

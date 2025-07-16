@@ -15,16 +15,16 @@
 //! When the `std` feature is enabled, one is provided and automatically selected
 //! as the default.
 //!
-//! First, implement [`MikkTSpaceInterface`] for your geometry.
+//! First, implement [`Geometry`] for your geometry.
 //!
 //! ```ignore
-//! impl MikkTSpaceInterface for MyGeometry { /* ... */ }
+//! impl Geometry for MyGeometry { /* ... */ }
 //! ```
 //!
 //! The interface is how this crate reads geometric information _and_ writes back
 //! the generated tangent space information.
 //!
-//! Finally, use [`generate_tangent_space`] to calculate and write back all
+//! Finally, use [`generate_tangents`] to calculate and write back all
 //! [`TangentSpace`] values.
 //!
 //! # Description
@@ -63,7 +63,7 @@
 //! Provides access to the standard library, allowing a default implementation
 //! of [`Ops`] to be provided.
 //! If you disable this feature, you will need to provide a type implementing
-//! [`Ops`] as the `O` parameter in the [`MikkTSpaceInterface`] trait.
+//! [`Ops`] as the `O` parameter in the [`Geometry`] trait.
 //!
 //! ```
 //! # use bevy_mikktspace::{Geometry, Ops};
@@ -126,7 +126,7 @@
 //!
 //! # Copyright
 //!
-//! This code is a Rust reimplementation of https://github.com/mmikk/MikkTSpace.
+//! This code is a Rust reimplementation of <https://github.com/mmikk/MikkTSpace>.
 //! The copyright notice below reflects that history, and should not be removed.
 //!
 //! > Copyright (C) 2011 by Morten S. Mikkelsen

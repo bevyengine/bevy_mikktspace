@@ -1,6 +1,6 @@
 //! # Copyright
 //!
-//! This code is a Rust reimplementation of https://github.com/mmikk/MikkTSpace.
+//! This code is a Rust reimplementation of <https://github.com/mmikk/MikkTSpace>.
 //! The copyright notice below reflects that history, and should not be removed.
 //!
 //! > Copyright (C) 2011 by Morten S. Mikkelsen
@@ -75,10 +75,10 @@ pub(crate) fn generate_tangent_space_and_write<I: Geometry<O>, O: Ops>(
     Ok(())
 }
 
-/// Generate [`TangentSpace`] values for the provided [geometry](MikkTSpaceInterface).
+/// Generate [`TangentSpace`] values for the provided [`Geometry`].
 ///
 /// This is separated from [`generate_tangent_space_and_write`] to highlight this
-/// step does not require mutable access to the provided [context](MikkTSpaceInterface).
+/// step does not require mutable access to the provided [`Geometry`].
 fn generate_tangent_space<I: Geometry<O>, O: Ops>(
     context: &I,
     linear_threshold: f32,
