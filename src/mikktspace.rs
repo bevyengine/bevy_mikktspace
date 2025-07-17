@@ -124,7 +124,11 @@ fn generate_tangent_space<I: Geometry<O>, O: Ops>(
 struct TangentSpace<O: Ops> {
     /// [`RawTangentSpace`] value this [`TangentSpace`] contains.
     value: RawTangentSpace<O>,
-    is_averaged: bool,
+    /// Indicates this value has already been [combined](RawTangentSpace::combine)
+    /// with another.
+    /// This only occurs with quads, where each triangle's tangent values
+    /// will be combined to produce the final result.
+    is_combined: bool,
     orientation_preserving: bool,
 }
 
@@ -157,16 +161,24 @@ impl<O: Ops> From<TangentSpace<O>> for crate::TangentSpace {
 struct TriangleInfo<O: Ops> {
     /// Stores the index of each neighboring triangle to this one, if any.
     /// Indices correspond to _edges_ of this triangle, rather than _vertices_.
+    ///
+    /// In other words, `face_neighbors[n] = a` implies the nth edge is shared with
+    /// a [triangle](TriangleInfo) with index `a`.
     face_neighbors: [Option<usize>; 3],
-
     /// Stores which [`Group`] each vertex on this triangle is a member of, if any.
+    ///
+    /// In other words, `assigned_group[n] = a` implies the nth vertex is a part
+    /// of the [`Group`] indexed by `a`.
     assigned_group: [Option<usize>; 3],
-
+    /// First-order tangent and bi-tangent value for this triangle.
     tangent: RawTangentSpace<O>,
-
     /// Determines if the current and the next triangle are a quad.
     original_face_index: usize,
-
+    /// Index into a list of [`TangentSpace`] values.
+    /// As each [`TangentSpace`] value corresponds to a vertex on this triangle,
+    /// [`tangent_spaces_offset`](TriangleInfo::tangent_spaces_offset) corresponds
+    /// to the 0th vertex, `tangent_spaces_offset + 1` to the 1st, and likewise
+    /// `tangent_spaces_offset + 2` to the 2nd.
     tangent_spaces_offset: usize,
     /// Indicates which vertex this triangle does not contain from its original face.
     /// For triangles, this will be [`None`].
@@ -178,6 +190,10 @@ struct TriangleInfo<O: Ops> {
     /// Indicates this triangle is a member of a quad where one of the triangles
     /// is degenerate, but the other is not.
     quad_with_one_degenerate_triangle: bool,
+    /// Indicates that this triangle can be [grouped](Group) with any of its
+    /// neighbors, regardless of typical merging rules.
+    /// This typically happens when a triangle is poorly defined and must rely on
+    /// a neighbor for a meaningful tangent value.
     group_with_any: bool,
     orientation_preserving: bool,
 }
@@ -653,16 +669,16 @@ fn generate_tangent_spaces<I: Geometry<O>, O: Ops>(
             debug_assert!(a.orientation_preserving == group.orientation_preserving);
 
             if let Some(tangent_space) = tangent_space {
-                debug_assert!(!tangent_space.is_averaged);
+                debug_assert!(!tangent_space.is_combined);
                 *tangent_space = TangentSpace {
                     value: tangent_space.value.combine(sub_group_tangent_spaces[l]),
-                    is_averaged: true,
+                    is_combined: true,
                     orientation_preserving: group.orientation_preserving,
                 };
             } else {
                 *tangent_space = Some(TangentSpace {
                     value: sub_group_tangent_spaces[l],
-                    is_averaged: false,
+                    is_combined: false,
                     orientation_preserving: group.orientation_preserving,
                 });
             }
