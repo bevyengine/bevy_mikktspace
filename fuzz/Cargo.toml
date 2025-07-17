@@ -1,0 +1,45 @@
+[package]
+name = "bevy_mikktspace-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[lib]
+
+[features]
+corrected-edge-sorting = ["bevy_mikktspace/corrected-edge-sorting"]
+corrected-vertex-welding = ["bevy_mikktspace/corrected-vertex-welding"]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.bevy_mikktspace]
+path = ".."
+
+[dependencies.mikktspace-sys]
+version = "0.1.1"
+
+[[bin]]
+name = "one_triangle"
+path = "src/one_triangle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "many_faces"
+path = "src/many_faces.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "many_faces_threshold"
+path = "src/many_faces_threshold.rs"
+test = false
+doc = false
+bench = false
