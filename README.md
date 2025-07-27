@@ -1,7 +1,7 @@
 # Bevy Mikktspace
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache%2FZlib-blue.svg)](https://github.com/bevyengine/bevy#license)
-[![Crates.io](https://img.shields.io/crates/v/bevy.svg)](https://crates.io/crates/bevy_mikktspace)
+[![Crates.io](https://img.shields.io/crates/v/bevy_mikktspace.svg)](https://crates.io/crates/bevy_mikktspace)
 [![Downloads](https://img.shields.io/crates/d/bevy_mikktspace.svg)](https://crates.io/crates/bevy_mikktspace)
 [![Docs](https://docs.rs/bevy_mikktspace/badge.svg)](https://docs.rs/bevy_mikktspace/latest/bevy_mikktspace/)
 [![Discord](https://img.shields.io/discord/691052431525675048.svg?label=&logo=discord&logoColor=ffffff&color=7389D8&labelColor=6A7EC2)](https://discord.gg/bevy)
